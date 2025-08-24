@@ -1,0 +1,87 @@
+﻿archetype_key,count,share_pct
+[overlap>=1+dup>=0+lohi=1] [2E3O] [sum=Low|spread=8-9] | struct=single,10,5.05
+[overlap>=1+dup>=0+lohi=1] [3E2O] [sum=Low|spread=8-9] | struct=single,8,4.04
+[overlap>=1+dup>=1+lohi=1] [3E2O] [sum=Mid|spread=6-7] | struct=double,8,4.04
+[overlap>=1+dup>=1+lohi=1] [4E1O] [sum=Low|spread=8-9] | struct=double,8,4.04
+[overlap>=1+dup>=0+lohi=1] [3E2O] [sum=Low|spread=6-7] | struct=single,6,3.03
+[overlap>=1+dup>=1+lohi=1] [2E3O] [sum=Low|spread=8-9] | struct=double,6,3.03
+[overlap>=1+dup>=1+lohi=1] [3E2O] [sum=Low|spread=6-7] | struct=double,6,3.03
+[overlap>=1+dup>=1+lohi=1] [2E3O] [sum=Mid|spread=6-7] | struct=double,6,3.03
+[overlap>=1+dup>=1+lohi=1] [2E3O] [sum=Low|spread=6-7] | struct=double,5,2.53
+[overlap>=1+dup>=1+lohi=1] [2E3O] [sum=Mid|spread=8-9] | struct=double,5,2.53
+[overlap>=1+dup>=0+lohi=1] [3E2O] [sum=Mid|spread=6-7] | struct=single,5,2.53
+[overlap>=1+dup>=1+lohi=1] [1E4O] [sum=Mid|spread=6-7] | struct=double,4,2.02
+[overlap>=1+dup>=1+lohi=1] [3E2O] [sum=Mid|spread=8-9] | struct=double,4,2.02
+[overlap>=1+dup>=1+lohi=1] [4E1O] [sum=Low|spread=6-7] | struct=double,4,2.02
+[overlap>=1+dup>=1+lohi=1] [4E1O] [sum=Mid|spread=4-5] | struct=double,4,2.02
+[overlap>=1+dup>=1+lohi=1] [3E2O] [sum=Low|spread=8-9] | struct=double,4,2.02
+[overlap>=1+dup>=0+lohi=1] [1E4O] [sum=Mid|spread=8-9] | struct=single,4,2.02
+[overlap>=1+dup>=0+lohi=1] [1E4O] [sum=Low|spread=8-9] | struct=single,3,1.52
+[overlap>=1+dup>=0+lohi=1] [3E2O] [sum=Mid|spread=8-9] | struct=single,3,1.52
+[overlap>=1+dup>=0+lohi=1] [3E2O] [sum=Low|spread=4-5] | struct=single,3,1.52
+[overlap>=1+dup>=0+lohi=1] [2E3O] [sum=Mid|spread=8-9] | struct=single,3,1.52
+[overlap>=1+dup>=0+lohi=1] [2E3O] [sum=Mid|spread=6-7] | struct=single,3,1.52
+[overlap>=1+dup>=1+lohi=1] [3E2O] [sum=Low|spread=6-7] | struct=double_double,3,1.52
+[overlap>=1+dup>=1+lohi=1] [2E3O] [sum=Low|spread=4-5] | struct=double,3,1.52
+[overlap>=1+dup>=1+lohi=1] [1E4O] [sum=Mid|spread=8-9] | struct=double,3,1.52
+[overlap>=1+dup>=0+lohi=1] [2E3O] [sum=Low|spread=6-7] | struct=single,3,1.52
+[overlap>=1+dup>=1+lohi=1] [1E4O] [sum=Low|spread=6-7] | struct=double,3,1.52
+[overlap>=1+dup>=0+lohi=1] [4E1O] [sum=Low|spread=8-9] | struct=single,3,1.52
+[overlap>=1+dup>=1+lohi=1] [2E3O] [sum=Mid|spread=4-5] | struct=double,2,1.01
+[overlap>=1+dup>=1+lohi=1] [2E3O] [sum=Mid|spread=8-9] | struct=triple,2,1.01
+[overlap>=1+dup>=1+lohi=1] [1E4O] [sum=Mid|spread=4-5] | struct=double,2,1.01
+[overlap>=1+dup>=1+lohi=1] [2E3O] [sum=Low|spread=6-7] | struct=double_double,2,1.01
+[overlap>=1+dup>=0+lohi=1] [2E3O] [sum=Mid|spread=4-5] | struct=single,2,1.01
+[overlap>=1+dup>=1+lohi=1] [3E2O] [sum=Low|spread=4-5] | struct=double,2,1.01
+[overlap>=1+dup>=1+lohi=1] [3E2O] [sum=Very Low|spread=4-5] | struct=double,2,1.01
+[overlap>=1+dup>=1+lohi=1] [3E2O] [sum=Very Low|spread=6-7] | struct=double,2,1.01
+[overlap>=1+dup>=1+lohi=1] [5E0O] [sum=Low|spread=8-9] | struct=double,2,1.01
+[overlap>=1+dup>=1+lohi=1] [1E4O] [sum=Low|spread=4-5] | struct=double,2,1.01
+[overlap>=1+dup>=0+lohi=1] [3E2O] [sum=Very Low|spread=6-7] | struct=single,1,0.51
+[overlap>=1+dup>=0+lohi=1] [3E2O] [sum=High|spread=4-5] | struct=single,1,0.51
+[overlap>=0+dup>=1+lohi=1] [5E0O] [sum=Low|spread=8-9] | struct=triple_double,1,0.51
+[overlap>=1+dup>=0+lohi=1] [1E4O] [sum=Low|spread=6-7] | struct=single,1,0.51
+[overlap>=0+dup>=1+lohi=1] [2E3O] [sum=Low|spread=6-7] | struct=triple_double,1,0.51
+[overlap>=0+dup>=1+lohi=1] [2E3O] [sum=Mid|spread=4-5] | struct=double,1,0.51
+[overlap>=0+dup>=1+lohi=1] [3E2O] [sum=Very Low|spread=6-7] | struct=double,1,0.51
+[overlap>=0+dup>=1+lohi=1] [4E1O] [sum=Low|spread=6-7] | struct=double_double,1,0.51
+[overlap>=0+dup>=1+lohi=0] [3E2O] [sum=High|spread=0-3] | struct=double_double,1,0.51
+[overlap>=0+dup>=1+lohi=1] [1E4O] [sum=Low|spread=6-7] | struct=triple,1,0.51
+[overlap>=1+dup>=1+lohi=0] [1E4O] [sum=High|spread=4-5] | struct=double,1,0.51
+[overlap>=1+dup>=0+lohi=1] [4E1O] [sum=Very Low|spread=6-7] | struct=single,1,0.51
+[overlap>=1+dup>=1+lohi=0] [1E4O] [sum=Mid|spread=4-5] | struct=double,1,0.51
+[overlap>=1+dup>=1+lohi=0] [1E4O] [sum=Very Low|spread=0-3] | struct=double_double,1,0.51
+[overlap>=1+dup>=1+lohi=0] [1E4O] [sum=Very Low|spread=0-3] | struct=triple,1,0.51
+[overlap>=1+dup>=1+lohi=0] [1E4O] [sum=Mid|spread=0-3] | struct=triple,1,0.51
+[overlap>=1+dup>=1+lohi=1] [2E3O] [sum=Low|spread=6-7] | struct=triple,1,0.51
+[overlap>=1+dup>=1+lohi=1] [2E3O] [sum=High|spread=4-5] | struct=double,1,0.51
+[overlap>=1+dup>=1+lohi=1] [1E4O] [sum=Mid|spread=8-9] | struct=double_double,1,0.51
+[overlap>=1+dup>=1+lohi=1] [1E4O] [sum=Low|spread=4-5] | struct=triple,1,0.51
+[overlap>=1+dup>=1+lohi=1] [1E4O] [sum=Low|spread=0-3] | struct=double_double,1,0.51
+[overlap>=1+dup>=1+lohi=1] [0E5O] [sum=Low|spread=8-9] | struct=double,1,0.51
+[overlap>=1+dup>=1+lohi=1] [0E5O] [sum=Low|spread=6-7] | struct=triple,1,0.51
+[overlap>=1+dup>=1+lohi=0] [2E3O] [sum=High|spread=0-3] | struct=triple,1,0.51
+[overlap>=1+dup>=1+lohi=0] [3E2O] [sum=High|spread=0-3] | struct=double_double,1,0.51
+[overlap>=1+dup>=1+lohi=0] [3E2O] [sum=High|spread=0-3] | struct=triple,1,0.51
+[overlap>=1+dup>=1+lohi=0] [3E2O] [sum=Very Low|spread=0-3] | struct=double,1,0.51
+[overlap>=1+dup>=1+lohi=0] [3E2O] [sum=Very Low|spread=4-5] | struct=double_double,1,0.51
+[overlap>=1+dup>=1+lohi=0] [4E1O] [sum=High|spread=0-3] | struct=triple,1,0.51
+[overlap>=1+dup>=1+lohi=0] [4E1O] [sum=Very Low|spread=0-3] | struct=triple,1,0.51
+[overlap>=1+dup>=1+lohi=1] [0E5O] [sum=Low|spread=6-7] | struct=double,1,0.51
+[overlap>=1+dup>=1+lohi=1] [0E5O] [sum=Low|spread=6-7] | struct=double_double,1,0.51
+[overlap>=1+dup>=1+lohi=1] [3E2O] [sum=Mid|spread=4-5] | struct=double,1,0.51
+[overlap>=1+dup>=1+lohi=1] [3E2O] [sum=Low|spread=4-5] | struct=double_double,1,0.51
+[overlap>=1+dup>=1+lohi=1] [2E3O] [sum=Very Low|spread=8-9] | struct=double,1,0.51
+[overlap>=1+dup>=1+lohi=1] [2E3O] [sum=Very Low|spread=4-5] | struct=double_double,1,0.51
+[overlap>=1+dup>=1+lohi=1] [2E3O] [sum=Mid|spread=6-7] | struct=double_double,1,0.51
+[overlap>=1+dup>=1+lohi=1] [2E3O] [sum=Mid|spread=4-5] | struct=double_double,1,0.51
+[overlap>=1+dup>=1+lohi=1] [2E3O] [sum=Very Low|spread=4-5] | struct=double,1,0.51
+[overlap>=1+dup>=1+lohi=1] [3E2O] [sum=Mid|spread=6-7] | struct=double_double,1,0.51
+[overlap>=1+dup>=1+lohi=1] [3E2O] [sum=Very Low|spread=8-9] | struct=double,1,0.51
+[overlap>=1+dup>=1+lohi=1] [4E1O] [sum=Mid|spread=6-7] | struct=double,1,0.51
+[overlap>=1+dup>=1+lohi=1] [4E1O] [sum=Mid|spread=8-9] | struct=double_double,1,0.51
+[overlap>=1+dup>=1+lohi=1] [4E1O] [sum=Mid|spread=8-9] | struct=double,1,0.51
+[overlap>=1+dup>=1+lohi=1] [4E1O] [sum=Very Low|spread=4-5] | struct=double,1,0.51
+[overlap>=1+dup>=1+lohi=1] [4E1O] [sum=Very Low|spread=6-7] | struct=triple,1,0.51
+[overlap>=1+dup>=1+lohi=1] [5E0O] [sum=Mid|spread=6-7] | struct=double_double,1,0.51
+[overlap>=1+dup>=1+lohi=1] [5E0O] [sum=Very Low|spread=6-7] | struct=double,1,0.51
