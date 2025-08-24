@@ -1,4 +1,4 @@
-from __future__ import annotations  # <-- delete this line if you prefer Option A
+from __future__ import annotations
 import streamlit as st
 from pathlib import Path
 import pandas as pd
@@ -6,40 +6,66 @@ import pandas as pd
 st.set_page_config(page_title="Archetype Safe Filter Explorer", layout="wide")
 st.title("Archetype Safe Filter Explorer")
 
-OUT_DIR = Path(".")
+# Where to look for exports
+SEARCH_DIRS = [Path("."), Path("outputs"), Path("out"), Path("data")]
 
-# Look for archetype CSVs written by the recommender
-candidates = (
-    list(OUT_DIR.glob("arch_*.csv")) +
-    list(OUT_DIR.glob("archetype_*.csv")) +
-    list(OUT_DIR.glob("*archetype*.csv")) +
-    list(OUT_DIR.glob("*archetypes*.csv"))
-)
+# Filename filter (substring match). Clear to show all CSVs.
+needle = st.text_input(
+    "Filter file names (substring, optional)",
+    value="archetype",
+    help="Examples: archetype, seed, export, perf. Leave blank to show all CSV files."
+).strip().lower()
 
-if not candidates:
+# Collect CSVs and de-duplicate by absolute path
+found: list[Path] = []
+seen: set[str] = set()
+for d in SEARCH_DIRS:
+    if d.exists():
+        for p in d.glob("*.csv"):
+            if needle and needle not in p.name.lower():
+                continue
+            rp = str(p.resolve())
+            if rp not in seen:
+                seen.add(rp)
+                found.append(p)
+
+found = sorted(found, key=lambda p: (str(p.parent), p.name))
+
+if not found:
     st.info(
-        "No archetype CSVs found in the repo root. "
-        "When files like 'arch_seed_archetype_perf.csv' or 'archetype_filter_perf.csv' "
-        "exist, they’ll show up here."
+        "No matching CSVs found. Try clearing the filename filter above or "
+        "rename your export to include a helpful word (e.g., 'archetype'). "
+        "Searched in: " + ", ".join(str(d) for d in SEARCH_DIRS)
     )
 else:
-    st.caption(f"Found {len(candidates)} file(s). Click to preview & download.")
-    for f in sorted(candidates):
-        with st.expander(f.name, expanded=False):
+    st.caption(f"Found {len(found)} CSV file(s). Click to preview & download.")
+    for i, f in enumerate(found):
+        with st.expander(f"{f.parent}/**{f.name}**", expanded=False):
+            # Try reading as text CSV; keep values as strings for safety.
             try:
-                df = pd.read_csv(f)
+                df = pd.read_csv(f, dtype=str, engine="python", on_bad_lines="skip")
             except Exception as e:
                 st.error(f"Could not read {f.name}: {e}")
                 continue
 
-            show_all = st.toggle(f"Show all rows for {f.name}", value=False, key=f"all_{f.name}")
-            st.dataframe(df if show_all else df.head(500), use_container_width=True, hide_index=True)
+            # Basic file stats
+            st.write(f"Rows: **{len(df):,}** &nbsp;&nbsp; Columns: **{len(df.columns):,}**")
+
+            # Unique widget keys per file to avoid DuplicateElementKey
+            show_all = st.toggle("Show all rows", value=False, key=f"show_{i}")
+            max_rows = None if show_all else 500
+
+            st.dataframe(
+                df if max_rows is None else df.head(max_rows),
+                use_container_width=True,
+                hide_index=True
+            )
 
             st.download_button(
-                label=f"Download {f.name}",
+                label="Download this CSV",
                 data=f.read_bytes(),
                 file_name=f.name,
                 mime="text/csv",
                 type="primary",
-                key=f"dl_{f.name}",
+                key=f"dl_{i}",
             )
