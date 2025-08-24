@@ -24,6 +24,23 @@ def sum_category(total: int) -> str:
     if 25 <= total <= 33: return "Mid"
     return "High"
 
+def spread_band(spread: int) -> str:
+    if spread <= 3: return "0–3"
+    if spread <= 5: return "4–5"
+    if spread <= 7: return "6–7"
+    if spread <= 9: return "8–9"
+    return "10+"
+
+def classify_structure(digs: List[int]) -> str:
+    c = Counter(digs); counts = sorted(c.values(), reverse=True)
+    if counts == [5]:       return "quint"
+    if counts == [4,1]:     return "quad"
+    if counts == [3,2]:     return "triple_double"
+    if counts == [3,1,1]:   return "triple"
+    if counts == [2,2,1]:   return "double_double"
+    if counts == [2,1,1,1]: return "double"
+    return "single"
+
 def digits_of(s: str):
     return [int(ch) for ch in str(s)]
 
@@ -141,6 +158,51 @@ def build_ctx_for_pool(seed, prev_seed, prev_prev):
         'max': max, 'min': min, 'set': set, 'sorted': sorted
     }
     return base
+
+# --------- NEW: seed profile / archetype badge ---------
+def seed_profile(seed: str, prev_seed: str = "", prev_prev: str = "") -> Dict[str, object]:
+    sd = digits_of(seed) if seed else []
+    evens = sum(1 for d in sd if d % 2 == 0)
+    odds = 5 - evens if len(sd) == 5 else max(0, len(sd) - evens)
+    parity_str = f"{evens}E/{odds}O" if len(sd) == 5 else "—"
+
+    total = sum(sd) if sd else 0
+    s_cat = sum_category(total)
+
+    s_spread = (max(sd) - min(sd)) if sd else 0
+    s_spread_band = spread_band(s_spread)
+
+    c = Counter(sd)
+    structure = classify_structure(sd) if sd else "—"
+    has_dupe = any(v >= 2 for v in c.values())
+
+    hi = sum(1 for d in sd if d >= 5)
+    lo = sum(1 for d in sd if d <= 4)
+    hi_lo = "Hi+Lo" if hi > 0 and lo > 0 else ("All-Hi" if lo == 0 and hi > 0 else ("All-Low" if hi == 0 and lo > 0 else "—"))
+
+    pdigs = set(digits_of(prev_seed)) if prev_seed else set()
+    carry = len(set(sd) & pdigs) if sd else 0
+    new_cnt = len(set(sd) - pdigs) if sd else 0
+
+    vdiv = len(set(VTRAC[d] for d in sd)) if sd else 0
+
+    signature = f"{structure} • {parity_str} • {s_cat} • {s_spread_band} • {hi_lo}" if sd else "—"
+
+    return {
+        "digits": sd,
+        "signature": signature,
+        "sum": total,
+        "sum_cat": s_cat,
+        "parity": parity_str,
+        "structure": structure,
+        "spread": s_spread,
+        "spread_band": s_spread_band,
+        "hi_lo": hi_lo,
+        "has_dupe": has_dupe,
+        "carry_from_prev": carry,
+        "new_vs_prev": new_cnt,
+        "vtrac_diversity": vdiv,
+    }
 
 # -----------------------
 # Filter CSV loading/compilation
@@ -360,7 +422,31 @@ with st.sidebar:
     st.markdown("---")
     run_btn = st.button("Run analysis & plan", type="primary", use_container_width=True)
 
-# -------------- Guard: require Run --------------
+# --------- Validate seed & show seed profile panel (TOP) ---------
+if not (seed.isdigit() and len(seed) == 5):
+    st.error("Seed must be exactly 5 digits.")
+    st.stop()
+
+prof = seed_profile(seed, prev_seed, prev_prev)
+
+st.markdown("### Seed Profile • Archetype")
+c1, c2, c3, c4 = st.columns(4)
+with c1:
+    st.metric("Signature", prof["signature"])
+    st.caption("structure • parity • sum band • spread band • hi/lo")
+with c2:
+    st.metric("Sum", f"{prof['sum']} ({prof['sum_cat']})")
+    st.metric("Parity", prof["parity"])
+with c3:
+    st.metric("Spread", f"{prof['spread']} ({prof['spread_band']})")
+    st.metric("VTRAC groups", f"{prof['vtrac_diversity']}")
+with c4:
+    st.metric("Duplicates", "Yes" if prof["has_dupe"] else "No")
+    st.metric("Carry/New vs prev", f"{prof['carry_from_prev']}/{prof['new_vs_prev']}")
+
+st.markdown("---")
+
+# -------------- Guard: require Run for heavy work --------------
 if "results_cache" not in st.session_state:
     st.session_state.results_cache = None
 
@@ -368,12 +454,30 @@ if not run_btn and st.session_state.results_cache is None:
     st.info("Use the **sidebar** to set inputs, then click **Run analysis & plan**.")
     st.stop()
 
-# Validate seed
-if not (seed.isdigit() and len(seed) == 5):
-    st.error("Seed must be exactly 5 digits.")
-    st.stop()
-
 # ---------- Helper to compute pipeline ----------
+def load_filters_csv(path: Path) -> pd.DataFrame:  # (redeclared to keep code block self-contained)
+    df = pd.read_csv(path)
+    df.columns = [c.strip().lower() for c in df.columns]
+    if "id" not in df.columns:
+        if "fid" in df.columns:
+            df["id"] = df["fid"]
+        else:
+            raise ValueError("Filters CSV must contain an 'id' or 'fid' column.")
+    for col in ("name","applicable_if","expression"):
+        if col in df.columns:
+            df[col] = (
+                df[col].astype(str)
+                .str.strip()
+                .str.replace('"""','"', regex=False)
+                .str.replace("'''","'", regex=False)
+            )
+            df[col] = df[col].apply(
+                lambda s: s[1:-1] if len(s)>=2 and s[0]==s[-1] and s[0] in {'"', "'"} else s
+            )
+    if "enabled" not in df.columns:
+        df["enabled"] = True
+    return df
+
 def compute_everything():
     # Load filters CSV
     filters_path = Path(filters_path_str)
@@ -525,7 +629,6 @@ def compute_everything():
                     beam_width=int(beam_width),
                     max_steps=int(max_steps)
                 )
-        # else: leave as None
 
     return {
         "df": df,
@@ -539,6 +642,9 @@ def compute_everything():
     }
 
 # Compute or reuse cached results
+if "results_cache" not in st.session_state:
+    st.session_state.results_cache = None
+
 if run_btn or st.session_state.results_cache is None:
     results = compute_everything()
     st.session_state.results_cache = results
@@ -563,7 +669,6 @@ st.subheader("Large Filters (bucketed by eliminations on *your* pool)")
 if large_df.empty:
     st.info("No large filters matched your rules among the pasted IDs for this pool.")
 else:
-    # Show with visual group headers
     for g in group_order:
         sub = large_df[large_df["aggression_group"] == g]
         if sub.empty: 
@@ -671,6 +776,7 @@ else:
 st.markdown("---")
 with st.expander("Column guide", expanded=False):
     st.markdown("""
+- **Seed Profile / Archetype** – Quick snapshot: structure • parity • sum band • spread band • hi/lo mix, plus duplicates, carry/new vs prev, VTRAC diversity.
 - **elim_count_on_pool** – Eliminations on the pool you provided (**your aggression metric**).
 - **elim_even / elim_odd** – Split of eliminations; helps spot parity-wipers.
 - **parity_wiper** – True if a filter wipes *all* evens or *all* odds in your pool (optionally excluded).
