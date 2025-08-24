@@ -159,7 +159,7 @@ def build_ctx_for_pool(seed, prev_seed, prev_prev):
     }
     return base
 
-# --------- NEW: seed profile / archetype badge ---------
+# --------- Seed profile / archetype badge ---------
 def seed_profile(seed: str, prev_seed: str = "", prev_prev: str = "") -> Dict[str, object]:
     sd = digits_of(seed) if seed else []
     evens = sum(1 for d in sd if d % 2 == 0)
@@ -305,7 +305,7 @@ def hist_safety(app_code, expr_code, winners):
     return app_days, blocked_days, kept_rate, blocked_rate
 
 # -----------------------
-# Winner-preserving plan (beam search)
+# Planners
 # -----------------------
 def winner_preserving_plan(
     large_df, E_map, names_map, pool_len, winner_idx,
@@ -321,7 +321,6 @@ def winner_preserving_plan(
     if winner_idx is not None and winner_idx not in P0:
         return None
 
-    # Row lookup for scoring (kept rate & evidence)
     large_index = large_df.set_index("filter_id")
 
     best = {"pool": P0, "steps": []}
@@ -384,11 +383,167 @@ def winner_preserving_plan(
         return {"steps": best["steps"], "final_pool_idx": best["pool"]}
     return None
 
+def best_case_plan_no_winner(
+    large_df, E_map, names_map, pool_len, target_max,
+    exp_safety_map: Dict[str, float]
+):
+    """
+    Greedy plan (no known winner). At each step choose the unused Large filter
+    that maximizes score = eliminations_now * (0.25 + 0.75 * expected_safety).
+    expected_safety is blended from hist kept-rate and archetype lift for the
+    current seed profile (if available).
+    """
+    P = set(range(pool_len))
+    used: Set[str] = set()
+    steps = []
+    while len(P) > target_max:
+        best = None
+        best_score = -1.0
+        for fid, E in E_map.items():
+            if fid in used: 
+                continue
+            elim_now = len(P & E)
+            if elim_now <= 0:
+                continue
+            w = float(exp_safety_map.get(fid, 0.5))
+            # favor safety, but still care about eliminations
+            score = elim_now * (0.25 + 0.75 * w)
+            if score > best_score:
+                best_score = score
+                best = (fid, elim_now, w)
+        if best is None:
+            break
+        fid, elim_now, w = best
+        P = P - E_map[fid]
+        used.add(fid)
+        steps.append({
+            "filter_id": fid,
+            "name": names_map.get(fid, ""),
+            "eliminated_now": elim_now,
+            "remaining_after": len(P),
+            "expected_safety_%": round(100.0 * w, 2)
+        })
+    if steps:
+        return {"steps": steps, "final_pool_idx": P}
+    return None
+
+# -----------------------
+# Archetype lift loader
+# -----------------------
+def _first_col(df: pd.DataFrame, cand: List[str]) -> Optional[str]:
+    lc = {c.lower(): c for c in df.columns}
+    for x in cand:
+        if x.lower() in lc:
+            return lc[x.lower()]
+    return None
+
+def load_archetype_dimension_lifts(csv_path: Path) -> Optional[pd.DataFrame]:
+    if not csv_path.exists():
+        return None
+    try:
+        df = pd.read_csv(csv_path)
+        # try to normalize column names we’ll use
+        fid = _first_col(df, ["filter_id","fid","id"])
+        dim = _first_col(df, ["dimension","dim","feature","trait_name"])
+        val = _first_col(df, ["value","trait","bucket","bin"])
+        lift = None
+        for c in df.columns:
+            if "lift" in c.lower():
+                lift = c
+                break
+        kept = _first_col(df, ["kept_rate","kept%","kept_pct"])
+        base = _first_col(df, ["baseline_kept_rate","baseline_kept%","baseline_pct"])
+        supp = _first_col(df, ["applicable_days","support","n","days","app_days"])
+
+        if not (fid and dim and val):
+            return None
+        if not lift:
+            # synth lift if possible
+            if kept and base:
+                df["__lift_tmp__"] = pd.to_numeric(df[kept], errors="coerce") / pd.to_numeric(df[base], errors="coerce")
+                lift = "__lift_tmp__"
+            else:
+                return None
+
+        use_cols = [fid, dim, val, lift]
+        if supp: use_cols.append(supp)
+        out = df[use_cols].dropna().copy()
+        out.columns = ["filter_id","dimension","value","lift"] + (["support"] if supp else [])
+        # sanitize
+        out["filter_id"] = out["filter_id"].astype(str).str.strip()
+        out["dimension"] = out["dimension"].astype(str).str.strip().str.lower()
+        out["value"] = out["value"].astype(str).str.strip()
+        out["lift"] = pd.to_numeric(out["lift"], errors="coerce")
+        out = out.dropna(subset=["lift"])
+        return out
+    except Exception:
+        return None
+
+def current_traits_for_match(prof: Dict[str, object]) -> Dict[str, List[str]]:
+    # Provide multiple synonyms to increase match chance with analyzer outputs
+    traits = {
+        "sum_cat": [str(prof["sum_cat"])],
+        "sum_category": [str(prof["sum_cat"])],
+        "parity": [str(prof["parity"])],                     # e.g., "3E/2O"
+        "parity_major": ["even>=3" if prof["parity"] and prof["parity"][0].isdigit() and int(prof["parity"][0])>=3 else "even<=2"],
+        "structure": [str(prof["structure"])],
+        "spread_band": [str(prof["spread_band"])],
+        "spread": [str(prof["spread_band"])],
+        "hi_lo": [str(prof["hi_lo"])],
+        "has_dupe": ["True" if prof["has_dupe"] else "False", "Yes" if prof["has_dupe"] else "No"],
+    }
+    return traits
+
+def compute_expected_safety_map(
+    large_df: pd.DataFrame,
+    arch_df: Optional[pd.DataFrame],
+    prof: Dict[str, object]
+) -> Dict[str, float]:
+    """
+    Returns fid -> expected safety in [0,1].
+    expected = clamp( base_hist_kept * geom_mean(clamped_lifts for matching traits) )
+    """
+    # base kept-rate from history
+    base_map = {}
+    for _, r in large_df.iterrows():
+        fid = str(r["filter_id"])
+        kept = r.get("hist_kept_rate")
+        base_map[fid] = float(kept)/100.0 if pd.notna(kept) else 0.5
+
+    if arch_df is None or arch_df.empty:
+        return {fid: max(0.05, min(0.99, base_map.get(fid, 0.5))) for fid in base_map}
+
+    trait_dict = current_traits_for_match(prof)  # dim -> list of acceptable values
+    # pre-index archetype table by filter
+    by_f = {fid: sub for fid, sub in arch_df.groupby(arch_df["filter_id"].astype(str))}
+    out = {}
+    for fid, base in base_map.items():
+        sub = by_f.get(str(fid))
+        if sub is None or sub.empty:
+            out[fid] = max(0.05, min(0.99, base))
+            continue
+        lifts = []
+        for _, row in sub.iterrows():
+            dim = str(row["dimension"]).lower()
+            val = str(row["value"])
+            if dim in trait_dict and any(val == v for v in trait_dict[dim]):
+                L = float(row["lift"])
+                # clamp lift to temper extremes
+                L = max(0.7, min(1.3, L))
+                lifts.append(L)
+        if lifts:
+            gm = math.exp(sum(math.log(x) for x in lifts) / len(lifts))
+            expected = base * gm
+        else:
+            expected = base
+        out[fid] = max(0.05, min(0.99, expected))
+    return out
+
 # -----------------------
 # UI (Sidebar + Results)
 # -----------------------
 st.set_page_config(page_title="Archetype — Large Filters Planner (Winner-Preserving)", layout="wide")
-st.title("Archetype Helper — Large Filters, Triggers & Winner-Preserving Plan")
+st.title("Archetype Helper — Large Filters, Triggers & Plans")
 
 with st.sidebar:
     st.header("Inputs")
@@ -413,14 +568,19 @@ with st.sidebar:
                                  help="Parity-wiper = wipes all evens or all odds in your pool")
 
     st.markdown("---")
-    st.subheader("Planner (winner-preserving)")
-    known_winner = st.text_input("Known winner (5 digits; for backtests)", value="", max_chars=5).strip()
-    target_max = st.number_input("Target kept combos", min_value=5, max_value=200, value=45, step=1)
+    st.subheader("Best-case Planner (no known winner)")
+    use_archetype_lifts = st.checkbox("Use archetype-lift CSV if present", value=True)
+    target_max_bc = st.number_input("Target kept combos (best-case)", min_value=5, max_value=200, value=45, step=1)
+
+    st.markdown("---")
+    st.subheader("Winner-preserving Planner (for backtests)")
+    known_winner = st.text_input("Known winner (5 digits)", value="", max_chars=5).strip()
+    target_max_wp = st.number_input("Target kept combos (winner-preserving)", min_value=5, max_value=200, value=45, step=1)
     beam_width = st.number_input("Beam width", min_value=1, max_value=20, value=3, step=1)
     max_steps = st.number_input("Max steps", min_value=1, max_value=50, value=12, step=1)
 
     st.markdown("---")
-    run_btn = st.button("Run analysis & plan", type="primary", use_container_width=True)
+    run_btn = st.button("Run analysis & plans", type="primary", use_container_width=True)
 
 # --------- Validate seed & show seed profile panel (TOP) ---------
 if not (seed.isdigit() and len(seed) == 5):
@@ -451,33 +611,10 @@ if "results_cache" not in st.session_state:
     st.session_state.results_cache = None
 
 if not run_btn and st.session_state.results_cache is None:
-    st.info("Use the **sidebar** to set inputs, then click **Run analysis & plan**.")
+    st.info("Use the **sidebar** to set inputs, then click **Run analysis & plans**.")
     st.stop()
 
-# ---------- Helper to compute pipeline ----------
-def load_filters_csv(path: Path) -> pd.DataFrame:  # (redeclared to keep code block self-contained)
-    df = pd.read_csv(path)
-    df.columns = [c.strip().lower() for c in df.columns]
-    if "id" not in df.columns:
-        if "fid" in df.columns:
-            df["id"] = df["fid"]
-        else:
-            raise ValueError("Filters CSV must contain an 'id' or 'fid' column.")
-    for col in ("name","applicable_if","expression"):
-        if col in df.columns:
-            df[col] = (
-                df[col].astype(str)
-                .str.strip()
-                .str.replace('"""','"', regex=False)
-                .str.replace("'''","'", regex=False)
-            )
-            df[col] = df[col].apply(
-                lambda s: s[1:-1] if len(s)>=2 and s[0]==s[-1] and s[0] in {'"', "'"} else s
-            )
-    if "enabled" not in df.columns:
-        df["enabled"] = True
-    return df
-
+# ---------- Pipeline ----------
 def compute_everything():
     # Load filters CSV
     filters_path = Path(filters_path_str)
@@ -520,14 +657,14 @@ def compute_everything():
     if len(pool_digits) == 0:
         return {"error": "Pool has no valid 5-digit combos after cleaning."}
 
-    # Even/odd counts
+    # Even/odd counts for parity check
     total_even = sum(1 for cd in pool_digits if (sum(cd) % 2) == 0)
     total_odd  = len(pool_digits) - total_even
 
-    # Base env
+    # Build base env for pool evaluation
     base_env = build_ctx_for_pool(seed, prev_seed, prev_prev)
 
-    # Optional: winners history
+    # Optional: winners (for historical safety)
     winners_list = None
     if winners_path_str:
         wp = Path(winners_path_str)
@@ -544,7 +681,9 @@ def compute_everything():
                 winners_list = wdf[wcol].astype(str).str.replace(r"\D","",regex=True).str.zfill(5)
                 winners_list = winners_list[winners_list.str.fullmatch(r"\d{5}")].tolist()
 
+    # -----------------------
     # Scan the pasted filters
+    # -----------------------
     records = []
     E_map = {}  # filter_id -> set(indices eliminated on initial pool)
     for _, r in df_filters.iterrows():
@@ -580,7 +719,9 @@ def compute_everything():
 
     df = pd.DataFrame(records)
 
+    # -----------------------
     # Large & Trigger sets
+    # -----------------------
     def bucket(c):
         c = int(c)
         if c >= 701: return "701+"
@@ -607,28 +748,50 @@ def compute_everything():
 
     trig_df = df[df["seed_specific_trigger"]].copy().sort_values(by=["filter_id"])
 
-    # Winner-preserving plan (optional)
-    plan_result = None
+    # -----------------------
+    # Expected-safety weights (archetype lifts)
+    # -----------------------
+    arch_df = None
+    if use_archetype_lifts:
+        arch_df = load_archetype_dimension_lifts(Path("archetype_filter_dimension_stats.csv"))
+
+    exp_safety_map = compute_expected_safety_map(large_df, arch_df, prof)
+
+    # -----------------------
+    # Plans
+    # -----------------------
+    plan_best = None
+    if not large_df.empty:
+        E_sub = {fid:E_map[fid] for fid in large_df["filter_id"].astype(str) if fid in E_map}
+        plan_best = best_case_plan_no_winner(
+            large_df=large_df,
+            E_map=E_sub,
+            names_map={fid: df_filters.set_index("id").loc[int(fid) if fid.isdigit() else fid].get("name","") if fid in E_sub else "" for fid in E_sub},
+            pool_len=len(pool_digits),
+            target_max=int(target_max_bc),
+            exp_safety_map=exp_safety_map
+        )
+
+    plan_wp = None
     winner_idx = None
-    if known_winner and known_winner.isdigit() and len(known_winner) == 5:
-        candidate_ids = set(large_df["filter_id"].astype(str))
-        if candidate_ids:
-            try:
-                winner_idx = pool_series.tolist().index(known_winner)
-            except ValueError:
-                winner_idx = None
-            E_sub = {fid:E_map[fid] for fid in candidate_ids if fid in E_map}
-            if (winner_idx is not None) and (known_winner in pool_series.values):
-                plan_result = winner_preserving_plan(
-                    large_df=large_df,
-                    E_map=E_sub,
-                    names_map=names_map,
-                    pool_len=len(pool_digits),
-                    winner_idx=winner_idx,
-                    target_max=int(target_max),
-                    beam_width=int(beam_width),
-                    max_steps=int(max_steps)
-                )
+    if known_winner and known_winner.isdigit() and len(known_winner) == 5 and not large_df.empty:
+        try:
+            winner_idx = pool_series.tolist().index(known_winner)
+        except ValueError:
+            winner_idx = None
+        if winner_idx is not None:
+            E_sub = {fid:E_map[fid] for fid in large_df["filter_id"].astype(str) if fid in E_map}
+            names_map = {fid: df_filters.set_index("id").loc[int(fid) if fid.isdigit() else fid].get("name","") if fid in E_sub else "" for fid in E_sub}
+            plan_wp = winner_preserving_plan(
+                large_df=large_df,
+                E_map=E_sub,
+                names_map=names_map,
+                pool_len=len(pool_digits),
+                winner_idx=winner_idx,
+                target_max=int(target_max_wp),
+                beam_width=int(beam_width),
+                max_steps=int(max_steps)
+            )
 
     return {
         "df": df,
@@ -636,15 +799,13 @@ def compute_everything():
         "trig_df": trig_df,
         "group_order": group_order,
         "pool_series": pool_series,
-        "plan_result": plan_result,
-        "E_map": E_map,
+        "plan_best": plan_best,
+        "plan_wp": plan_wp,
+        "exp_safety_map": exp_safety_map,
         "error": None,
     }
 
 # Compute or reuse cached results
-if "results_cache" not in st.session_state:
-    st.session_state.results_cache = None
-
 if run_btn or st.session_state.results_cache is None:
     results = compute_everything()
     st.session_state.results_cache = results
@@ -660,7 +821,9 @@ large_df = results["large_df"]
 trig_df = results["trig_df"]
 group_order = results["group_order"]
 pool_series = results["pool_series"]
-plan = results["plan_result"]
+plan_best = results["plan_best"]
+plan_wp = results["plan_wp"]
+exp_safety_map = results["exp_safety_map"]
 
 # -----------------------
 # Show + Downloads (Large / Triggers)
@@ -720,63 +883,103 @@ else:
 st.markdown("---")
 
 # -----------------------
-# Winner-preserving recommended plan
+# Best-case planner (no known winner)
 # -----------------------
-st.subheader(f"Recommended Plan — Winner-Preserving (aim: ≤ {int(target_max)} combos)")
+st.subheader(f"Best-case plan — Large filters only (aim: ≤ {int(st.session_state.get('results_cache', {}).get('plan_best', {}) and st.session_state.results_cache['plan_best'] and 0) or int(st.session_state.get('target_max_bc', 45))} combos)")
+if plan_best is None:
+    st.info("Best-case plan could not reduce the pool to your target with available Large filters, or no Large filters were detected.")
+else:
+    steps = plan_best["steps"]
+    bc_df = pd.DataFrame(steps)
+    st.dataframe(bc_df, use_container_width=True, hide_index=True, height=min(320, 60 + 28*len(bc_df)))
+
+    # Downloads: plan CSV + TXT
+    bc_csv = "best_case_plan.csv"
+    bc_txt = "best_case_plan.txt"
+    bc_df.to_csv(bc_csv, index=False)
+    with open(bc_txt, "w", encoding="utf-8") as fh:
+        for i, row in enumerate(steps, 1):
+            fh.write(f"Step {i}: {row['filter_id']}  {row['name']}  | eliminated={row['eliminated_now']}  | remaining={row['remaining_after']}  | expected_safety%={row['expected_safety_%']}\n")
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.download_button("Download best-case plan (CSV)", data=Path(bc_csv).read_bytes(),
+                           file_name=bc_csv, mime="text/csv")
+    with c2:
+        st.download_button("Download best-case plan (TXT)", data=Path(bc_txt).read_bytes(),
+                           file_name=bc_txt, mime="text/plain")
+
+    # Final kept pool (indices)
+    kept_idx = sorted(list(plan_best["final_pool_idx"]))
+    kept_combos = [pool_series.iloc[i] for i in kept_idx]
+    kept_df = pd.DataFrame({"combo": kept_combos})
+    st.caption(f"Best-case final kept pool size: {len(kept_combos)}")
+    st.dataframe(kept_df.head(100), use_container_width=True, hide_index=True, height=260)
+    kept_csv = "best_case_final_kept_pool.csv"
+    kept_txt = "best_case_final_kept_pool.txt"
+    kept_df.to_csv(kept_csv, index=False)
+    with open(kept_txt, "w", encoding="utf-8") as fh:
+        for s in kept_combos:
+            fh.write(f"{s}\n")
+    c3, c4 = st.columns(2)
+    with c3:
+        st.download_button("Download best-case kept pool (CSV)", data=Path(kept_csv).read_bytes(),
+                           file_name=kept_csv, mime="text/csv")
+    with c4:
+        st.download_button("Download best-case kept pool (TXT)", data=Path(kept_txt).read_bytes(),
+                           file_name=kept_txt, mime="text/plain")
+
+st.markdown("---")
+
+# -----------------------
+# Winner-preserving planner (optional)
+# -----------------------
+st.subheader(f"Winner-preserving plan — Large filters only (aim: ≤ {int(target_max_wp)} combos)")
 if not known_winner:
     st.info("Provide a 5-digit **Known winner** in the sidebar to compute a winner-preserving plan (use backtests).")
 else:
-    if not (known_winner.isdigit() and len(known_winner) == 5):
-        st.error("Known winner must be exactly 5 digits.")
+    if plan_wp is None:
+        st.info("No winner-preserving reduction possible with the available Large filters (or winner not in pool).")
     else:
-        if plan is None:
-            st.info("No winner-preserving reduction possible with the available large filters (or winner not in pool).")
-        else:
-            steps = plan["steps"]
-            plan_df = pd.DataFrame(steps)
-            st.dataframe(plan_df, use_container_width=True, hide_index=True, height=min(320, 60 + 28*len(plan_df)))
+        steps = plan_wp["steps"]
+        plan_df = pd.DataFrame(steps)
+        st.dataframe(plan_df, use_container_width=True, hide_index=True, height=min(320, 60 + 28*len(plan_df)))
 
-            # Downloads: plan CSV + TXT
-            plan_csv = "recommended_plan.csv"
-            plan_txt = "recommended_plan.txt"
-            plan_df.to_csv(plan_csv, index=False)
-            with open(plan_txt, "w", encoding="utf-8") as fh:
-                for i, row in enumerate(steps, 1):
-                    fh.write(f"Step {i}: {row['filter_id']}  {row['name']}  | eliminated={row['eliminated_now']}  | remaining={row['remaining_after']}\n")
+        # Downloads: plan CSV + TXT
+        plan_csv = "winner_preserving_plan.csv"
+        plan_txt = "winner_preserving_plan.txt"
+        plan_df.to_csv(plan_csv, index=False)
+        with open(plan_txt, "w", encoding="utf-8") as fh:
+            for i, row in enumerate(steps, 1):
+                fh.write(f"Step {i}: {row['filter_id']}  {row['name']}  | eliminated={row['eliminated_now']}  | remaining={row['remaining_after']}\n")
 
-            c1, c2 = st.columns(2)
-            with c1:
-                st.download_button("Download plan (CSV)", data=Path(plan_csv).read_bytes(),
-                                   file_name=plan_csv, mime="text/csv")
-            with c2:
-                st.download_button("Download plan (TXT)", data=Path(plan_txt).read_bytes(),
-                                   file_name=plan_txt, mime="text/plain")
+        # Final kept pool (indices)
+        kept_idx = sorted(list(plan_wp["final_pool_idx"]))
+        kept_combos = [pool_series.iloc[i] for i in kept_idx]
+        kept_df = pd.DataFrame({"combo": kept_combos})
+        st.caption(f"Winner-preserving final kept pool size: {len(kept_combos)}")
+        st.dataframe(kept_df.head(100), use_container_width=True, hide_index=True, height=260)
+        kept_csv = "winner_preserving_final_kept_pool.csv"
+        kept_txt = "winner_preserving_final_kept_pool.txt"
+        kept_df.to_csv(kept_csv, index=False)
+        with open(kept_txt, "w", encoding="utf-8") as fh:
+            for s in kept_combos:
+                fh.write(f"{s}\n")
+        c3, c4 = st.columns(2)
+        with c3:
+            st.download_button("Download winner-preserving kept pool (CSV)", data=Path(kept_csv).read_bytes(),
+                               file_name=kept_csv, mime="text/csv")
+        with c4:
+            st.download_button("Download winner-preserving kept pool (TXT)", data=Path(kept_txt).read_bytes(),
+                               file_name=kept_txt, mime="text/plain")
 
-            # Final kept pool (indices)
-            kept_idx = sorted(list(plan["final_pool_idx"]))
-            kept_combos = [pool_series.iloc[i] for i in kept_idx]
-            kept_df = pd.DataFrame({"combo": kept_combos})
-            st.caption(f"Final kept pool size: {len(kept_combos)}")
-            st.dataframe(kept_df.head(100), use_container_width=True, hide_index=True, height=260)
-            # Downloads for final pool
-            kept_csv = "final_kept_pool.csv"
-            kept_txt = "final_kept_pool.txt"
-            kept_df.to_csv(kept_csv, index=False)
-            with open(kept_txt, "w", encoding="utf-8") as fh:
-                for s in kept_combos:
-                    fh.write(f"{s}\n")
-            c3, c4 = st.columns(2)
-            with c3:
-                st.download_button("Download final kept pool (CSV)", data=Path(kept_csv).read_bytes(),
-                                   file_name=kept_csv, mime="text/csv")
-            with c4:
-                st.download_button("Download final kept pool (TXT)", data=Path(kept_txt).read_bytes(),
-                                   file_name=kept_txt, mime="text/plain")
-
+# ---------------
+# Column guide
+# ---------------
 st.markdown("---")
 with st.expander("Column guide", expanded=False):
     st.markdown("""
-- **Seed Profile / Archetype** – Quick snapshot: structure • parity • sum band • spread band • hi/lo mix, plus duplicates, carry/new vs prev, VTRAC diversity.
+- **Seed Profile / Archetype** – Snapshot: structure • parity • sum band • spread band • hi/lo mix; plus duplicates, carry/new vs prev, VTRAC diversity.
 - **elim_count_on_pool** – Eliminations on the pool you provided (**your aggression metric**).
 - **elim_even / elim_odd** – Split of eliminations; helps spot parity-wipers.
 - **parity_wiper** – True if a filter wipes *all* evens or *all* odds in your pool (optionally excluded).
@@ -784,5 +987,6 @@ with st.expander("Column guide", expanded=False):
 - **hist_applicable_days** – Across history, days the filter was applicable.
 - **hist_kept_rate** – When applicable, % of days the filter **kept** the true winner (higher = safer historically).
 - **aggression_group** – Bucket by eliminations on the pool: 701+, 501–700, 301–500, 101–300, 61–100, 1–60, 0.
-- **Recommended Plan** – Winner-preserving order of **Large** filters to target ≤ your goal (beam search).
+- **Best-case plan** – Greedy order of **Large** filters to reach ≤ target using expected safety = hist kept-rate × archetype-lift (if CSV found).
+- **Winner-preserving plan** – Beam-search order of **Large** filters that keeps a known winner (for backtests).
 """)
