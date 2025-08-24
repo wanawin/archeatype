@@ -1,47 +1,80 @@
-def historical_safety_for_archetype(
-    winners: List[str],
-    filters: List[FilterDef],
-    arch_name_now: str,
-    return_audit: bool = False,
-):
-    N = len(winners)
-    out: Dict[str, Dict[str, float]] = {f.fid: {"days": 0, "app": 0, "kept": 0} for f in filters if f.enabled}
-    audit_rows = []
-    if N < 2:
-        return (out, pd.DataFrame()) if return_audit else out
+# archeatype/archeatype.py — minimal, safe CSV explorer for archetype outputs
+from __future__ import annotations
 
-    envs = [build_env_for_draw(i, winners) for i in range(1, N)]
-    arch_keys = [day_arche_key(winners, i) for i in range(1, N)]
+from pathlib import Path
+import io
 
-    for i, env in enumerate(envs, start=1):
-        if arch_keys[i-1] != arch_name_now:
-            continue
-        for f in filters:
-            if not f.enabled:
+import pandas as pd
+import streamlit as st
+
+st.set_page_config(page_title="Archetype Safe Filter Explorer", layout="wide")
+
+st.title("Archetype Safe Filter Explorer")
+
+root = Path(".")
+
+# Any archetype exports we might produce
+PATTERNS = [
+    "archetype_export_*.csv",
+    "arch_seed_archetype_perf.csv",
+    "archetype_filter_perf.csv",
+    "archetype_*_perf*.csv",
+]
+
+# Gather files once
+files: list[Path] = []
+for pat in PATTERNS:
+    files.extend(sorted(root.glob(pat)))
+
+if not files:
+    st.info(
+        "No archetype CSVs found in the repo root. When files like "
+        "'arch_seed_archetype_perf.csv' or 'archetype_filter_perf.csv' exist, "
+        "they’ll show up here."
+    )
+else:
+    st.write(f"Found **{len(files)}** file(s). Click to preview & download.")
+    for i, f in enumerate(files):
+        with st.expander(f.name, expanded=(i == 0)):
+            # Read defensively
+            try:
+                df = pd.read_csv(f)
+            except Exception as e:
+                st.error(f"Failed to read {f.name}: {e}")
                 continue
-            out[f.fid]["days"] += 1
-            applicable = safe_eval(f.applicable_if, env)
-            blocked = False
-            if applicable:
-                out[f.fid]["app"] += 1
-                blocked = safe_eval(f.expression, env)
-                if not blocked:
-                    out[f.fid]["kept"] += 1
-            if return_audit:
-                audit_rows.append({
-                    "day_index": i,
-                    "seed": env["seed"],
-                    "winner": env["combo"],
-                    "archetype": arch_keys[i-1],
-                    "filter_id": f.fid,
-                    "filter_name": f.name,
-                    "applicable": bool(applicable),
-                    "blocked_winner": bool(blocked),
-                })
 
-    for fid, d in out.items():
-        d["kept_pct"] = (d["kept"] / d["app"] * 100.0) if d["app"] > 0 else None
+            # Unique control keys per file (avoid DuplicateElementKey errors)
+            max_rows = int(max(1, len(df)))
+            default_rows = min(100, max_rows)
+            n_show = st.number_input(
+                "Rows to show",
+                min_value=1,
+                max_value=max_rows,
+                value=default_rows,
+                step=min(50, max_rows),
+                key=f"rows_{i}",
+            )
 
-    if return_audit:
-        return out, pd.DataFrame(audit_rows)
-    return out
+            st.dataframe(df.head(int(n_show)), use_container_width=True)
+
+            # Download buttons
+            st.download_button(
+                "Download CSV",
+                data=f.read_bytes(),
+                file_name=f.name,
+                mime="text/csv",
+                key=f"dl_csv_{i}",
+            )
+
+            # Optional: quick Excel export
+            if st.checkbox("Also offer Excel (.xlsx) export", key=f"xlsx_{i}"):
+                bio = io.BytesIO()
+                with pd.ExcelWriter(bio, engine="xlsxwriter") as xw:
+                    df.to_excel(xw, index=False, sheet_name="data")
+                st.download_button(
+                    "Download Excel",
+                    data=bio.getvalue(),
+                    file_name=f.with_suffix(".xlsx").name,
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key=f"dl_xlsx_{i}",
+                )
