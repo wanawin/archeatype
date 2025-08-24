@@ -1,12 +1,16 @@
 # archetype_large_filter_scan.py
-import streamlit as st
-import pandas as pd
-import numpy as np
-from pathlib import Path
-from collections import Counter
-import re
+from __future__ import annotations
+
 import io
 import math
+import re
+from collections import Counter
+from pathlib import Path
+from typing import Dict, List, Optional, Set, Tuple
+
+import numpy as np
+import pandas as pd
+import streamlit as st
 
 # -----------------------
 # Core helpers & signals
@@ -151,8 +155,15 @@ def load_filters_csv(path: Path) -> pd.DataFrame:
             raise ValueError("Filters CSV must contain an 'id' or 'fid' column.")
     for col in ("name","applicable_if","expression"):
         if col in df.columns:
-            df[col] = df[col].astype(str).str.strip().str.replace('"""','"', regex=False).str.replace("'''","'", regex=False)
-            df[col] = df[col].apply(lambda s: s[1:-1] if len(s)>=2 and s[0]==s[-1] and s[0] in {'"', "'"} else s)
+            df[col] = (
+                df[col].astype(str)
+                .str.strip()
+                .str.replace('"""','"', regex=False)
+                .str.replace("'''","'", regex=False)
+            )
+            df[col] = df[col].apply(
+                lambda s: s[1:-1] if len(s)>=2 and s[0]==s[-1] and s[0] in {'"', "'"} else s
+            )
     if "enabled" not in df.columns:
         df["enabled"] = True
     return df
@@ -251,33 +262,28 @@ def winner_preserving_plan(
     # Row lookup for scoring (kept rate & evidence)
     large_index = large_df.set_index("filter_id")
 
-    best = {"pool": P0, "steps": []}  # start as no-op
+    best = {"pool": P0, "steps": []}
     seen = {}
 
     def score_candidate(fid, elim_now):
-        # prefer high kept-rate, more evidence, then elimination power
         kept = large_index.loc[fid]["hist_kept_rate"]
         days = large_index.loc[fid]["hist_applicable_days"]
-        kept01 = (kept/100.0) if pd.notna(kept) else 0.5
-        days = days if pd.notna(days) else 0
+        kept01 = (float(kept)/100.0) if pd.notna(kept) else 0.5
+        days = float(days) if pd.notna(days) else 0.0
         return elim_now * (0.5 + 0.5*kept01) * math.log1p(days)
 
     def key(P, used):
-        # compact state key for pruning
         return (len(P), tuple(sorted(used))[:8])
 
     def dfs(P, used, log, depth):
         nonlocal best
-        # winner must survive
         if winner_idx is not None and winner_idx not in P:
             return
-        # target reached?
         if len(P) <= target_max:
             if len(P) < len(best["pool"]) or (len(P) == len(best["pool"]) and len(log) < len(best["steps"])):
                 best = {"pool": set(P), "steps": list(log)}
             return
         if depth >= max_steps:
-            # update best if strictly better
             if len(P) < len(best["pool"]):
                 best = {"pool": set(P), "steps": list(log)}
             return
@@ -287,7 +293,6 @@ def winner_preserving_plan(
             return
         seen[k] = len(P)
 
-        # Build candidate list
         cands = []
         for fid, E in E_map.items():
             if fid in used: continue
@@ -297,7 +302,6 @@ def winner_preserving_plan(
             cands.append((fid, elim_now, score_candidate(fid, elim_now)))
 
         if not cands:
-            # no further reduction
             if len(P) < len(best["pool"]):
                 best = {"pool": set(P), "steps": list(log)}
             return
@@ -319,36 +323,49 @@ def winner_preserving_plan(
     return None
 
 # -----------------------
-# UI
+# UI (Sidebar + Results)
 # -----------------------
 st.set_page_config(page_title="Archetype — Large Filters Planner (Winner-Preserving)", layout="wide")
 st.title("Archetype Helper — Large Filters, Triggers & Winner-Preserving Plan")
 
-with st.expander("Inputs", expanded=True):
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        seed = st.text_input("Seed (1-back, 5 digits)*", value="", max_chars=5).strip()
-    with c2:
-        prev_seed = st.text_input("Prev seed (2-back, optional)", value="", max_chars=5).strip()
-    with c3:
-        prev_prev = st.text_input("Prev-prev seed (3-back, optional)", value="", max_chars=5).strip()
+with st.sidebar:
+    st.header("Inputs")
+    seed = st.text_input("Seed (1-back, 5 digits) *", value="", max_chars=5).strip()
+    prev_seed = st.text_input("Prev seed (2-back, optional)", value="", max_chars=5).strip()
+    prev_prev = st.text_input("Prev-prev seed (3-back, optional)", value="", max_chars=5).strip()
 
-    c4, c5 = st.columns(2)
-    with c4:
-        filters_path_str = st.text_input("Filters CSV path", value="lottery_filters_batch_10.csv")
-        winners_path_str = st.text_input("Winners CSV path (optional, for historical kept%)", value="DC5_Midday_Full_Cleaned_Expanded.csv")
-    with c5:
-        pool_path_str = st.text_input("Pool CSV path", value="today_pool.csv")
-        pool_col_hint = st.text_input("Pool column (auto-detects 'combo'/'Result' if blank)", value="")
+    st.markdown("---")
+    filters_path_str = st.text_input("Filters CSV path", value="lottery_filters_batch_10.csv")
+    winners_path_str = st.text_input("Winners CSV (optional for history)", value="DC5_Midday_Full_Cleaned_Expanded.csv")
+    pool_path_str = st.text_input("Pool CSV path", value="today_pool.csv")
+    pool_col_hint = st.text_input("Pool column (blank → auto)", value="")
 
-    ids_text = st.text_area("Paste Applicable Filter IDs (comma/space/newline separated)", height=100)
+    st.markdown("---")
+    ids_text = st.text_area("Paste Applicable Filter IDs", height=140,
+                            help="Comma/space/newline separated — the app will consider ONLY these.")
 
-    st.markdown("**Backtest (winner-preserving)** — to force the plan to keep the known winner, provide it here.")
-    known_winner = st.text_input("Known winner (5 digits, optional — used to enforce winner-preserving plan)", value="", max_chars=5).strip()
+    st.markdown("---")
+    st.subheader("Large Filter Rules")
+    min_elims = st.number_input("Min eliminations to call it ‘Large’", min_value=1, max_value=99999, value=200, step=1)
+    exclude_parity = st.checkbox("Exclude parity-wipers", value=True,
+                                 help="Parity-wiper = wipes all evens or all odds in your pool")
 
-    run_btn = st.button("Run analysis & plan", type="primary")
+    st.markdown("---")
+    st.subheader("Planner (winner-preserving)")
+    known_winner = st.text_input("Known winner (5 digits; for backtests)", value="", max_chars=5).strip()
+    target_max = st.number_input("Target kept combos", min_value=5, max_value=200, value=45, step=1)
+    beam_width = st.number_input("Beam width", min_value=1, max_value=20, value=3, step=1)
+    max_steps = st.number_input("Max steps", min_value=1, max_value=50, value=12, step=1)
 
-if not run_btn:
+    st.markdown("---")
+    run_btn = st.button("Run analysis & plan", type="primary", use_container_width=True)
+
+# -------------- Guard: require Run --------------
+if "results_cache" not in st.session_state:
+    st.session_state.results_cache = None
+
+if not run_btn and st.session_state.results_cache is None:
+    st.info("Use the **sidebar** to set inputs, then click **Run analysis & plan**.")
     st.stop()
 
 # Validate seed
@@ -356,168 +373,215 @@ if not (seed.isdigit() and len(seed) == 5):
     st.error("Seed must be exactly 5 digits.")
     st.stop()
 
-# Load filters CSV
-filters_path = Path(filters_path_str)
-if not filters_path.exists():
-    st.error(f"Filters CSV not found: {filters_path}")
+# ---------- Helper to compute pipeline ----------
+def compute_everything():
+    # Load filters CSV
+    filters_path = Path(filters_path_str)
+    if not filters_path.exists():
+        return {"error": f"Filters CSV not found: {filters_path}"}
+    df_filters = load_filters_csv(filters_path)
+
+    # Limit to pasted IDs
+    ids = [x.strip() for x in re.split(r"[,\s]+", ids_text) if x.strip()]
+    if not ids:
+        return {"error": "Paste at least one applicable filter ID in the sidebar."}
+    df_filters = df_filters[df_filters["id"].astype(str).isin(set(ids))].copy()
+    if df_filters.empty:
+        return {"error": "None of the pasted IDs were found in the filters CSV."}
+
+    # Compile filters
+    compiled = {}
+    names_map = {}
+    for _, r in df_filters.iterrows():
+        fid = str(r["id"]).strip()
+        names_map[fid] = str(r.get("name","")).strip()
+        compiled[fid] = compile_filter(r)
+
+    # Load pool
+    pool_path = Path(pool_path_str)
+    if not pool_path.exists():
+        return {"error": f"Pool CSV not found: {pool_path}"}
+    df_pool = pd.read_csv(pool_path)
+    pool_col = None
+    for cand in ([pool_col_hint] if pool_col_hint else []) + ["combo","Combo","result","Result"]:
+        if cand and cand in df_pool.columns:
+            pool_col = cand
+            break
+    if not pool_col:
+        return {"error": "Could not find a pool column. Add 'combo' (or 'Result'), or specify its name in the sidebar."}
+
+    pool_series = df_pool[pool_col].astype(str).str.replace(r"\D","",regex=True).str.zfill(5)
+    pool_series = pool_series[pool_series.str.fullmatch(r"\d{5}")]
+    pool_digits = [digits_of(s) for s in pool_series.tolist()]
+    if len(pool_digits) == 0:
+        return {"error": "Pool has no valid 5-digit combos after cleaning."}
+
+    # Even/odd counts
+    total_even = sum(1 for cd in pool_digits if (sum(cd) % 2) == 0)
+    total_odd  = len(pool_digits) - total_even
+
+    # Base env
+    base_env = build_ctx_for_pool(seed, prev_seed, prev_prev)
+
+    # Optional: winners history
+    winners_list = None
+    if winners_path_str:
+        wp = Path(winners_path_str)
+        if wp.exists():
+            wdf = pd.read_csv(wp)
+            wcol = None
+            if "Result" in wdf.columns: wcol = "Result"
+            else:
+                for c in wdf.columns:
+                    tmp = wdf[c].astype(str).str.replace(r"\D","",regex=True).str.zfill(5)
+                    if tmp.str.fullmatch(r"\d{5}").all():
+                        wcol = c; break
+            if wcol:
+                winners_list = wdf[wcol].astype(str).str.replace(r"\D","",regex=True).str.zfill(5)
+                winners_list = winners_list[winners_list.str.fullmatch(r"\d{5}")].tolist()
+
+    # Scan the pasted filters
+    records = []
+    E_map = {}  # filter_id -> set(indices eliminated on initial pool)
+    for _, r in df_filters.iterrows():
+        fid = str(r["id"]).strip()
+        name = names_map.get(fid, "")
+        app_code, expr_code = compiled[fid]
+
+        E, elim_even, elim_odd = elim_set_on_pool(app_code, expr_code, base_env, pool_digits)
+        elim_count = len(E)
+        parity_wiper = ((elim_even == total_even and total_even > 0) or (elim_odd == total_odd and total_odd > 0))
+        E_map[fid] = E
+
+        text_blob = f"{r.get('applicable_if','')} || {r.get('expression','')}"
+        seed_specific = is_seed_specific(text_blob)
+
+        app_days = blocked = None
+        kept_rate = blocked_rate = None
+        if winners_list and len(winners_list) >= 2:
+            app_days, blocked, kept_rate, blocked_rate = hist_safety(app_code, expr_code, winners_list)
+
+        records.append({
+            "filter_id": fid,
+            "name": name,
+            "elim_count_on_pool": elim_count,
+            "elim_even": elim_even,
+            "elim_odd": elim_odd,
+            "parity_wiper": parity_wiper,
+            "seed_specific_trigger": seed_specific,
+            "hist_applicable_days": app_days,
+            "hist_kept_rate": (None if kept_rate is None else round(100*kept_rate, 2)),
+            "hist_blocked_rate": (None if blocked_rate is None else round(100*blocked_rate, 2)),
+        })
+
+    df = pd.DataFrame(records)
+
+    # Large & Trigger sets
+    def bucket(c):
+        c = int(c)
+        if c >= 701: return "701+"
+        if c >= 501: return "501–700"
+        if c >= 301: return "301–500"
+        if c >= 101: return "101–300"
+        if c >=  61: return "61–100"
+        if c >=   1: return "1–60"
+        return "0"
+
+    large_df = df[(df["elim_count_on_pool"] >= int(min_elims))].copy()
+    if exclude_parity:
+        large_df = large_df[~large_df["parity_wiper"]].copy()
+
+    large_df["aggression_group"] = large_df["elim_count_on_pool"].map(bucket)
+    group_order = ["701+","501–700","301–500","101–300","61–100","1–60","0"]
+    rank_map = {g:i for i,g in enumerate(group_order)}
+    large_df["__g"] = large_df["aggression_group"].map(rank_map).fillna(999).astype(int)
+
+    large_df = large_df.sort_values(
+        by=["__g","hist_kept_rate","hist_applicable_days","elim_count_on_pool","filter_id"],
+        ascending=[True, False, False, False, True]
+    ).drop(columns="__g")
+
+    trig_df = df[df["seed_specific_trigger"]].copy().sort_values(by=["filter_id"])
+
+    # Winner-preserving plan (optional)
+    plan_result = None
+    winner_idx = None
+    if known_winner and known_winner.isdigit() and len(known_winner) == 5:
+        candidate_ids = set(large_df["filter_id"].astype(str))
+        if candidate_ids:
+            try:
+                winner_idx = pool_series.tolist().index(known_winner)
+            except ValueError:
+                winner_idx = None
+            E_sub = {fid:E_map[fid] for fid in candidate_ids if fid in E_map}
+            if (winner_idx is not None) and (known_winner in pool_series.values):
+                plan_result = winner_preserving_plan(
+                    large_df=large_df,
+                    E_map=E_sub,
+                    names_map=names_map,
+                    pool_len=len(pool_digits),
+                    winner_idx=winner_idx,
+                    target_max=int(target_max),
+                    beam_width=int(beam_width),
+                    max_steps=int(max_steps)
+                )
+        # else: leave as None
+
+    return {
+        "df": df,
+        "large_df": large_df,
+        "trig_df": trig_df,
+        "group_order": group_order,
+        "pool_series": pool_series,
+        "plan_result": plan_result,
+        "E_map": E_map,
+        "error": None,
+    }
+
+# Compute or reuse cached results
+if run_btn or st.session_state.results_cache is None:
+    results = compute_everything()
+    st.session_state.results_cache = results
+else:
+    results = st.session_state.results_cache
+
+if results.get("error"):
+    st.error(results["error"])
     st.stop()
-df_filters = load_filters_csv(filters_path)
 
-# Limit to pasted IDs
-ids = [x.strip() for x in re.split(r"[,\s]+", ids_text) if x.strip()]
-if not ids:
-    st.error("Paste at least one applicable filter ID.")
-    st.stop()
-df_filters = df_filters[df_filters["id"].astype(str).isin(set(ids))].copy()
-if df_filters.empty:
-    st.error("None of the pasted IDs were found in the filters CSV.")
-    st.stop()
-
-# Compile
-compiled = {}
-names_map = {}
-for _, r in df_filters.iterrows():
-    fid = str(r["id"]).strip()
-    names_map[fid] = str(r.get("name","")).strip()
-    compiled[fid] = compile_filter(r)
-
-# Load pool
-pool_path = Path(pool_path_str)
-if not pool_path.exists():
-    st.error(f"Pool CSV not found: {pool_path}")
-    st.stop()
-df_pool = pd.read_csv(pool_path)
-pool_col = None
-for cand in ([pool_col_hint] if pool_col_hint else []) + ["combo","Combo","result","Result"]:
-    if cand and cand in df_pool.columns:
-        pool_col = cand
-        break
-if not pool_col:
-    st.error("Could not find a pool column. Add 'combo' (or 'Result'), or specify its name.")
-    st.stop()
-
-pool_series = df_pool[pool_col].astype(str).str.replace(r"\D","",regex=True).str.zfill(5)
-pool_series = pool_series[pool_series.str.fullmatch(r"\d{5}")]
-pool_digits = [digits_of(s) for s in pool_series.tolist()]
-if len(pool_digits) == 0:
-    st.error("Pool has no valid 5-digit combos after cleaning.")
-    st.stop()
-
-# Even/odd counts for parity check
-total_even = sum(1 for cd in pool_digits if (sum(cd) % 2) == 0)
-total_odd  = len(pool_digits) - total_even
-
-# Build base env for pool evaluation
-base_env = build_ctx_for_pool(seed, prev_seed, prev_prev)
-
-# Optional: winners (for historical safety)
-winners_list = None
-if winners_path_str:
-    wp = Path(winners_path_str)
-    if wp.exists():
-        wdf = pd.read_csv(wp)
-        wcol = None
-        if "Result" in wdf.columns: wcol = "Result"
-        else:
-            for c in wdf.columns:
-                tmp = wdf[c].astype(str).str.replace(r"\D","",regex=True).str.zfill(5)
-                if tmp.str.fullmatch(r"\d{5}").all():
-                    wcol = c; break
-        if wcol:
-            winners_list = wdf[wcol].astype(str).str.replace(r"\D","",regex=True).str.zfill(5)
-            winners_list = winners_list[winners_list.str.fullmatch(r"\d{5}")].tolist()
-        else:
-            st.warning("Could not detect a 5-digit winners column; historical metrics will be skipped.")
-    else:
-        st.info("Winners CSV not found; skipping historical metrics.")
-
-# -----------------------
-# Scan the pasted filters
-# -----------------------
-records = []
-E_map = {}  # filter_id -> set(indices eliminated on initial pool)
-for _, r in df_filters.iterrows():
-    fid = str(r["id"]).strip()
-    name = names_map.get(fid, "")
-    app_code, expr_code = compiled[fid]
-
-    # elimination set on initial pool
-    E, elim_even, elim_odd = elim_set_on_pool(app_code, expr_code, base_env, pool_digits)
-    elim_count = len(E)
-    # parity wiper if wipes all evens or all odds present
-    parity_wiper = ((elim_even == total_even and total_even > 0) or (elim_odd == total_odd and total_odd > 0))
-    E_map[fid] = E
-
-    # seed-specific detection
-    text_blob = f"{r.get('applicable_if','')} || {r.get('expression','')}"
-    seed_specific = is_seed_specific(text_blob)
-
-    # historical safety (optional)
-    app_days = blocked = None
-    kept_rate = blocked_rate = None
-    if winners_list and len(winners_list) >= 2:
-        app_days, blocked, kept_rate, blocked_rate = hist_safety(app_code, expr_code, winners_list)
-
-    records.append({
-        "filter_id": fid,
-        "name": name,
-        "elim_count_on_pool": elim_count,
-        "elim_even": elim_even,
-        "elim_odd": elim_odd,
-        "parity_wiper": parity_wiper,
-        "seed_specific_trigger": seed_specific,
-        "hist_applicable_days": app_days,
-        "hist_kept_rate": (None if kept_rate is None else round(100*kept_rate, 2)),
-        "hist_blocked_rate": (None if blocked_rate is None else round(100*blocked_rate, 2)),
-    })
-
-df = pd.DataFrame(records)
-
-# -----------------------
-# Large & Trigger sets
-# -----------------------
-def bucket(c):
-    c = int(c)
-    if c >= 701: return "701+"
-    if c >= 501: return "501–700"
-    if c >= 301: return "301–500"
-    if c >= 101: return "101–300"
-    if c >=  61: return "61–100"
-    if c >=   1: return "1–60"
-    return "0"
-
-large_df = df[(df["elim_count_on_pool"] >= 200) & (~df["parity_wiper"])].copy()
-large_df["aggression_group"] = large_df["elim_count_on_pool"].map(bucket)
-group_order = ["701+","501–700","301–500","101–300","61–100","1–60","0"]
-rank_map = {g:i for i,g in enumerate(group_order)}
-large_df["__g"] = large_df["aggression_group"].map(rank_map).fillna(999).astype(int)
-
-large_df = large_df.sort_values(
-    by=["__g","hist_kept_rate","hist_applicable_days","elim_count_on_pool","filter_id"],
-    ascending=[True, False, False, False, True]
-).drop(columns="__g")
-
-trig_df = df[df["seed_specific_trigger"]].copy().sort_values(by=["filter_id"])
+df = results["df"]
+large_df = results["large_df"]
+trig_df = results["trig_df"]
+group_order = results["group_order"]
+pool_series = results["pool_series"]
+plan = results["plan_result"]
 
 # -----------------------
 # Show + Downloads (Large / Triggers)
 # -----------------------
-st.subheader("Large Filters (non-parity, bucketed by eliminations on *your* pool)")
+st.subheader("Large Filters (bucketed by eliminations on *your* pool)")
 if large_df.empty:
-    st.info("No large, non-parity filters among the pasted IDs for this pool.")
+    st.info("No large filters matched your rules among the pasted IDs for this pool.")
 else:
-    st.dataframe(
-        large_df[[
-            "aggression_group","filter_id","name","elim_count_on_pool","elim_even","elim_odd",
-            "hist_applicable_days","hist_kept_rate","hist_blocked_rate"
-        ]],
-        use_container_width=True, hide_index=True, height=480
-    )
+    # Show with visual group headers
+    for g in group_order:
+        sub = large_df[large_df["aggression_group"] == g]
+        if sub.empty: 
+            continue
+        st.markdown(f"### Group **{g}**")
+        st.dataframe(
+            sub[[
+                "aggression_group","filter_id","name","elim_count_on_pool","elim_even","elim_odd",
+                "hist_applicable_days","hist_kept_rate","hist_blocked_rate"
+            ]],
+            use_container_width=True, hide_index=True, height=min(400, 60 + 28*len(sub))
+        )
 
     # CSV
     large_csv = "large_filters_detected.csv"
     large_df.to_csv(large_csv, index=False)
-    st.download_button("Download large filters (CSV)", data=Path(large_csv).read_bytes(),
+    st.download_button("Download ALL large filters (CSV)",
+                       data=Path(large_csv).read_bytes(),
                        file_name=large_csv, mime="text/csv")
 
     # TXT with group delineations
@@ -527,7 +591,7 @@ else:
         if sub.empty: continue
         lines.append(f"===== GROUP {g} =====")
         for _, rr in sub.iterrows():
-            lines.append(f"{rr['filter_id']}  | kept%={rr['hist_kept_rate']}  | app_days={rr['hist_applicable_days']}  | elim={rr['elim_count_on_pool']}")
+            lines.append(f"{rr['filter_id']}  | kept%={rr.get('hist_kept_rate')}  | app_days={rr.get('hist_applicable_days')}  | elim={rr['elim_count_on_pool']}")
     st.download_button("Download group delineations (TXT)",
                        data=io.BytesIO(("\n".join(lines)).encode("utf-8")),
                        file_name="large_filter_groups.txt", mime="text/plain")
@@ -541,7 +605,7 @@ else:
             "filter_id","name","elim_count_on_pool","elim_even","elim_odd",
             "hist_applicable_days","hist_kept_rate","hist_blocked_rate","parity_wiper"
         ]],
-        use_container_width=True, hide_index=True, height=360
+        use_container_width=True, hide_index=True, height=min(360, 60 + 28*len(trig_df))
     )
     trig_csv  = "trigger_filters_detected.csv"
     trig_df.to_csv(trig_csv, index=False)
@@ -553,92 +617,66 @@ st.markdown("---")
 # -----------------------
 # Winner-preserving recommended plan
 # -----------------------
-st.subheader("Recommended Plan — Winner-Preserving (aim: ≤ 45 combos)")
+st.subheader(f"Recommended Plan — Winner-Preserving (aim: ≤ {int(target_max)} combos)")
 if not known_winner:
-    st.info("Provide a 5-digit **Known winner** to compute a winner-preserving plan (use backtests).")
+    st.info("Provide a 5-digit **Known winner** in the sidebar to compute a winner-preserving plan (use backtests).")
 else:
     if not (known_winner.isdigit() and len(known_winner) == 5):
         st.error("Known winner must be exactly 5 digits.")
     else:
-        # restrict candidate set to the large set only
-        candidate_ids = set(large_df["filter_id"].astype(str))
-        if not candidate_ids:
-            st.warning("No large filters available to plan with.")
+        if plan is None:
+            st.info("No winner-preserving reduction possible with the available large filters (or winner not in pool).")
         else:
-            # winner index within pool (if present)
-            try:
-                winner_idx = pool_series.tolist().index(known_winner)
-            except ValueError:
-                winner_idx = None
-                st.warning("Known winner is not in the provided pool — cannot enforce winner-preserving constraint.")
+            steps = plan["steps"]
+            plan_df = pd.DataFrame(steps)
+            st.dataframe(plan_df, use_container_width=True, hide_index=True, height=min(320, 60 + 28*len(plan_df)))
 
-            # Build E_map subset
-            E_sub = {fid:E_map[fid] for fid in candidate_ids if fid in E_map}
+            # Downloads: plan CSV + TXT
+            plan_csv = "recommended_plan.csv"
+            plan_txt = "recommended_plan.txt"
+            plan_df.to_csv(plan_csv, index=False)
+            with open(plan_txt, "w", encoding="utf-8") as fh:
+                for i, row in enumerate(steps, 1):
+                    fh.write(f"Step {i}: {row['filter_id']}  {row['name']}  | eliminated={row['eliminated_now']}  | remaining={row['remaining_after']}\n")
 
-            plan = winner_preserving_plan(
-                large_df=large_df,
-                E_map=E_sub,
-                names_map=names_map,
-                pool_len=len(pool_digits),
-                winner_idx=winner_idx,
-                target_max=45,
-                beam_width=3,
-                max_steps=12
-            )
+            c1, c2 = st.columns(2)
+            with c1:
+                st.download_button("Download plan (CSV)", data=Path(plan_csv).read_bytes(),
+                                   file_name=plan_csv, mime="text/csv")
+            with c2:
+                st.download_button("Download plan (TXT)", data=Path(plan_txt).read_bytes(),
+                                   file_name=plan_txt, mime="text/plain")
 
-            if not plan:
-                st.info("No winner-preserving reduction possible with the available large filters.")
-            else:
-                steps = plan["steps"]
-                plan_df = pd.DataFrame(steps)
-                st.dataframe(plan_df, use_container_width=True, hide_index=True, height=300)
-
-                # Downloads: plan CSV + TXT
-                plan_csv = "recommended_plan.csv"
-                plan_txt = "recommended_plan.txt"
-                plan_df.to_csv(plan_csv, index=False)
-                with open(plan_txt, "w", encoding="utf-8") as fh:
-                    for i, row in enumerate(steps, 1):
-                        fh.write(f"Step {i}: {row['filter_id']}  {row['name']}  | eliminated={row['eliminated_now']}  | remaining={row['remaining_after']}\n")
-
-                c1, c2 = st.columns(2)
-                with c1:
-                    st.download_button("Download plan (CSV)", data=Path(plan_csv).read_bytes(),
-                                       file_name=plan_csv, mime="text/csv")
-                with c2:
-                    st.download_button("Download plan (TXT)", data=Path(plan_txt).read_bytes(),
-                                       file_name=plan_txt, mime="text/plain")
-
-                # Final kept pool (indices)
-                kept_idx = sorted(list(plan["final_pool_idx"]))
-                kept_combos = [pool_series.iloc[i] for i in kept_idx]
-                kept_df = pd.DataFrame({"combo": kept_combos})
-                st.caption(f"Final kept pool size: {len(kept_combos)}")
-                st.dataframe(kept_df.head(100), use_container_width=True, hide_index=True, height=260)
-                # Downloads for final pool
-                kept_csv = "final_kept_pool.csv"
-                kept_txt = "final_kept_pool.txt"
-                kept_df.to_csv(kept_csv, index=False)
-                with open(kept_txt, "w", encoding="utf-8") as fh:
-                    for s in kept_combos:
-                        fh.write(f"{s}\n")
-                c3, c4 = st.columns(2)
-                with c3:
-                    st.download_button("Download final kept pool (CSV)", data=Path(kept_csv).read_bytes(),
-                                       file_name=kept_csv, mime="text/csv")
-                with c4:
-                    st.download_button("Download final kept pool (TXT)", data=Path(kept_txt).read_bytes(),
-                                       file_name=kept_txt, mime="text/plain")
+            # Final kept pool (indices)
+            kept_idx = sorted(list(plan["final_pool_idx"]))
+            kept_combos = [pool_series.iloc[i] for i in kept_idx]
+            kept_df = pd.DataFrame({"combo": kept_combos})
+            st.caption(f"Final kept pool size: {len(kept_combos)}")
+            st.dataframe(kept_df.head(100), use_container_width=True, hide_index=True, height=260)
+            # Downloads for final pool
+            kept_csv = "final_kept_pool.csv"
+            kept_txt = "final_kept_pool.txt"
+            kept_df.to_csv(kept_csv, index=False)
+            with open(kept_txt, "w", encoding="utf-8") as fh:
+                for s in kept_combos:
+                    fh.write(f"{s}\n")
+            c3, c4 = st.columns(2)
+            with c3:
+                st.download_button("Download final kept pool (CSV)", data=Path(kept_csv).read_bytes(),
+                                   file_name=kept_csv, mime="text/csv")
+            with c4:
+                st.download_button("Download final kept pool (TXT)", data=Path(kept_txt).read_bytes(),
+                                   file_name=kept_txt, mime="text/plain")
 
 st.markdown("---")
 with st.expander("Column guide", expanded=False):
     st.markdown("""
 - **elim_count_on_pool** – Eliminations on the pool you provided (**your aggression metric**).
 - **elim_even / elim_odd** – Split of eliminations; helps spot parity-wipers.
-- **parity_wiper** – True if a filter wipes *all* evens or *all* odds in your pool (these are excluded from the Large set).
+- **parity_wiper** – True if a filter wipes *all* evens or *all* odds in your pool (optionally excluded).
 - **seed_specific_trigger** – Filter references seed/prev-seed signals (seed_digits, seed_vtracs, prev_pattern, etc.).
 - **hist_applicable_days** – Across history, days the filter was applicable.
 - **hist_kept_rate** – When applicable, % of days the filter **kept** the true winner (higher = safer historically).
 - **aggression_group** – Bucket by eliminations on the pool: 701+, 501–700, 301–500, 101–300, 61–100, 1–60, 0.
-- **Recommended Plan** – Winner-preserving order of **Large** filters to target ≤45 kept combos (greedy beam search).
+- **Recommended Plan** – Winner-preserving order of **Large** filters to target ≤ your goal (beam search).
 """)
