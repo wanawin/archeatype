@@ -1,3 +1,4 @@
+import streamlit as st
 # /archeatype/arechatype.py
 # Minimal, safe Streamlit page to view archetype CSVs (if present)
 
