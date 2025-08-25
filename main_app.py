@@ -36,3 +36,21 @@ with st.expander("Global defaults (used by all pages)"):
         st.session_state["FILTERS_CSV"] = filters_
         st.session_state["POOL_CSV"] = pool
         st.success("Saved. All pages will read these defaults via session_state.")
+      import streamlit as st
+
+st.title("DC5 Toolkit — Main")
+
+st.markdown("### What’s here")
+
+st.page_link("pages/1_Large_Filters_Planner.py", label="Archetype — Large Filters Planner", icon="🧭")
+st.caption("Paste applicable filter IDs + a pool; see large filters, trigger filters, and a winner-preserving plan to reach ≤45.")
+
+st.page_link("pages/2_Recommender_Runner.py", label="Recommender Runner", icon="⚙️")
+st.caption("Classic end-to-end run that writes sequence, avoid_pairs, one-pager, and SafeLists.")
+
+st.page_link("pages/3_Profiler.py", label="Profiler (Build/Refresh)", icon="🧪")
+st.caption("Utilities to build/refresh history tables used by other tools.")
+
+st.page_link("pages/4_Archetype_Analyzer.py", label="Archetype Analyzer (history CSVs)", icon="📊")
+st.caption("Replays history to produce Top/Danger signals + dimension/composite stats.")
+
