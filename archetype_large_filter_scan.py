@@ -563,7 +563,7 @@ with st.sidebar:
 
     st.markdown("---")
     st.subheader("Large Filter Rules")
-    min_elims = st.number_input("Min eliminations to call it ‘Large’", min_value=1, max_value=99999, value=200, step=1)
+    min_elims = st.number_input("Min eliminations to call it ‘Large’", min_value=1, max_value=99999, value=100, step=1)
     exclude_parity = st.checkbox("Exclude parity-wipers", value=True,
                                  help="Parity-wiper = wipes all evens or all odds in your pool")
 
