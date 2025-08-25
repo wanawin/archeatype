@@ -1,6 +1,6 @@
-import streamlit as st
-import importlib
-import archetype_large_filter_scan as app  # lives at repo root
-importlib.reload(app)  # run the page code each rerun
-# shim page – renders the large-filters planner
-from archetype_large_filter_scan import *
+import importlib, streamlit as st
+try:
+    app = importlib.import_module("archetype_large_filter_scan")
+    importlib.reload(app)
+except Exception as e:
+    st.error(f"Could not load Large Filters Planner: {e}")
