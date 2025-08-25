@@ -1,6 +1,6 @@
-import streamlit as st
-import importlib
-import streamlined_streamlit_app as app  # your recommender UI at repo root
-importlib.reload(app)
-# shim page – renders the recommender UI you already have
-from streamlined_streamlit_app import *
+import importlib, streamlit as st
+try:
+    app = importlib.import_module("streamlined_streamlit_app")
+    importlib.reload(app)
+except Exception as e:
+    st.error(f"Could not load Recommender Runner: {e}")
