@@ -51,4 +51,4 @@ with st.sidebar:
     min_support  = st.number_input("Min applicable days for a signal", 1, 9999, 12)
     min_lift     = st.number_input("Min lift vs baseline for TOP signals", 1.00, 10.0, 1.10, step=0.01)
     max_lag      = st.number_input("Max lift vs baseline for DANGER signals", 0.10, 1.00, 0.90, step=0.01)
-    run_now =_
+    
