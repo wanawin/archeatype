@@ -14,6 +14,9 @@ from collections import Counter
 # -----------------------
 VTRAC = {0:1,5:1, 1:2,6:2, 2:3,7:3, 3:4,8:4, 4:5,9:5}
 MIRROR = {0:5,5:0,1:6,6:1,2:7,7:2,3:8,8:3,4:9,9:4}
+if pool_text.strip():
+#     raw = pool_text.replace('\n', ',').replace(' ', ',')
+#     pool_digits = [p.strip() for p in raw.split(',') if p.strip()]
 
 
 def sum_category(total: int) -> str:
