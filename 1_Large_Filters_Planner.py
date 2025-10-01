@@ -1,3 +1,5 @@
+import streamlit as st
+st.set_page_config(page_title="Large Filters Planner")
 from __future__ import annotations
 
 import io
