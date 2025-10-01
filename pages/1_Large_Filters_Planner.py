@@ -1,207 +1,30 @@
-from __future__ import annotations
-
-import io
-import math
-from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
-
-import pandas as pd
 import streamlit as st
+import pandas as pd
 from collections import Counter
+from typing import Dict, List, Tuple
 
 # -----------------------
-# Core helpers & signals
+# Utilities
 # -----------------------
-VTRAC = {0:1,5:1, 1:2,6:2, 2:3,7:3, 3:4,8:4, 4:5,9:5}
-MIRROR = {0:5,5:0,1:6,6:1,2:7,7:2,3:8,8:3,4:9,9:4}
-if pool_text.strip():
-#     raw = pool_text.replace('\n', ',').replace(' ', ',')
-#     pool_digits = [p.strip() for p in raw.split(',') if p.strip()]
 
+VTRAC = {0: 1, 5: 1, 1: 2, 6: 2, 2: 3, 7: 3, 3: 4, 8: 4, 4: 5, 9: 5}
+MIRROR = {0: 5, 5: 0, 1: 6, 6: 1, 2: 7, 7: 2, 3: 8, 8: 3, 4: 9, 9: 4}
+
+def digits_of(x: str) -> List[int]:
+    return [int(c) for c in str(x) if c.isdigit()]
 
 def sum_category(total: int) -> str:
-    if 0 <= total <= 15:  return "Very Low"
-    if 16 <= total <= 24: return "Low"
-    if 25 <= total <= 33: return "Mid"
-    return "High"
-
-
-def spread_band(spread: int) -> str:
-    if spread <= 3: return "0–3"
-    if spread <= 5: return "4–5"
-    if spread <= 7: return "6–7"
-    if spread <= 9: return "8–9"
-    return "10+"
-
-
-def classify_structure(digs: List[int]) -> str:
-    c = Counter(digs); counts = sorted(c.values(), reverse=True)
-    if counts == [5]:       return "quint"
-    if counts == [4,1]:     return "quad"
-    if counts == [3,2]:     return "triple_double"
-    if counts == [3,1,1]:   return "triple"
-    if counts == [2,2,1]:   return "double_double"
-    if counts == [2,1,1,1]: return "double"
-    return "single"
-
-
-def digits_of(s: str) -> List[int]:
-    return [int(ch) for ch in str(s) if ch.isdigit()]
-
+    if 0 <= total <= 15:
+        return 'Very Low'
+    elif 16 <= total <= 24:
+        return 'Low'
+    elif 25 <= total <= 33:
+        return 'Mid'
+    return 'High'
 
 # -----------------------
-# CSV loading/compilation
+# Build evaluation context
 # -----------------------
-
-def clean_filter_df(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    df.columns = [c.strip().lower() for c in df.columns]
-    if "id" not in df.columns:
-        if "fid" in df.columns:
-            df["id"] = df["fid"]
-        else:
-            raise ValueError("Filters CSV must contain an 'id' or 'fid' column.")
-    for col in ("name","applicable_if","expression"):
-        if col in df.columns:
-            df[col] = (
-                df[col].astype(str)
-                .str.strip()
-                .str.replace('"""','"', regex=False)
-                .str.replace("'''","'", regex=False)
-            )
-            df[col] = df[col].apply(
-                lambda s: s[1:-1] if len(s)>=2 and s[0]==s[-1] and s[0] in {'"', "'"} else s
-            )
-    if "enabled" not in df.columns:
-        df["enabled"] = True
-    return df
-
-
-def compile_filter(row) -> Tuple[object, object]:
-    app = (row.get("applicable_if") or "True")
-    expr = (row.get("expression") or "False")
-    try:
-        app_code = compile(app, "<app_if>", "eval")
-    except Exception:
-        app_code = compile("False", "<app_if>", "eval")
-    try:
-        expr_code = compile(expr, "<expr>", "eval")
-    except Exception:
-        expr_code = compile("False", "<expr>", "eval")
-    return app_code, expr_code
-
-
-# -----------------------
-# Context builders (history + pool)
-# -----------------------
-
-def seed_profile(seed: str, prev_seed: str, prev_prev: str) -> Dict:
-    sd = digits_of(seed)
-    parity_str = "Even" if sum(sd) % 2 == 0 else "Odd"
-
-    total = sum(sd) if sd else 0
-    s_cat = sum_category(total)
-
-    s_spread = (max(sd) - min(sd)) if sd else 0
-    s_spread_band = spread_band(s_spread)
-
-    c = Counter(sd)
-    structure = classify_structure(sd) if sd else "—"
-    has_dupe = any(v >= 2 for v in c.values())
-
-    hi = sum(1 for d in sd if d >= 5)
-    lo = sum(1 for d in sd if d <= 4)
-    hi_lo = "Hi+Lo" if hi > 0 and lo > 0 else ("All-Hi" if lo == 0 and hi > 0 else ("All-Low" if hi == 0 and lo > 0 else "—"))
-
-    pdigs = set(digits_of(prev_seed)) if prev_seed else set()
-    carry = len(set(sd) & pdigs) if sd else 0
-    new_cnt = len(set(sd) - pdigs) if sd else 0
-
-    vdiv = len(set(VTRAC[d] for d in sd)) if sd else 0
-
-    signature = f"{structure} • {parity_str} • {s_cat} • {s_spread_band} • {hi_lo}" if sd else "—"
-
-    return {
-        "digits": sd,
-        "signature": signature,
-        "sum": total,
-        "sum_cat": s_cat,
-        "parity": parity_str,
-        "structure": structure,
-        "spread": s_spread,
-        "spread_band": s_spread_band,
-        "hi_lo": hi_lo,
-        "has_dupe": has_dupe,
-        "carry_from_prev": carry,
-        "new_vs_prev": new_cnt,
-        "vtrac_diversity": vdiv,
-    }
-
-
-def build_day_env(winners_list: List[str], i: int) -> Dict:
-    seed = winners_list[i-1]
-    winner = winners_list[i]
-    sd = digits_of(seed)
-    cd = digits_of(winner)
-
-    # basic hot/cold/due using last k=10 windows
-    hist_digits = [digits_of(x) for x in winners_list[:i]]
-    flat = [d for row in hist_digits for d in row]
-    cnt = Counter(flat)
-    most = cnt.most_common()
-    hot = {d for d, c in most[:6]} if most else set()
-    # cold: lowest 4 (ties included)
-    cold = set()
-    if cnt:
-        least = sorted(cnt.items(), key=lambda kv: (kv[1], kv[0]))
-        cutoff = least[min(3, len(least)-1)][1]
-        cold = {d for d, c in least if c <= cutoff}
-    # due: not seen in last 2 draws
-    last2 = set(d for row in hist_digits[-2:] for d in row)
-    due = set(range(10)) - last2
-
-    # prev pattern
-    prev_prev = winners_list[i-2] if i-2 >= 0 else ""
-    pdigs = digits_of(seed)
-    ppdigs = digits_of(prev_prev) if prev_prev else []
-    prev_pattern = []
-    for digs in (ppdigs, pdigs, sd):
-        if digs:
-            parity = 'Even' if sum(digs) % 2 == 0 else 'Odd'
-            prev_pattern.extend([sum_category(sum(digs)), parity])
-        else:
-            prev_pattern.extend(['', ''])
-
-    env = {
-        'seed_digits': sd,
-        'prev_seed_digits': pdigs,
-        'prev_prev_seed_digits': ppdigs,
-        'new_seed_digits': set(sd) - set(pdigs),
-        'seed_counts': Counter(sd),
-        'seed_sum': sum(sd),
-        'prev_sum_cat': sum_category(sum(sd)),
-        'prev_pattern': tuple(prev_pattern),
-
-        'combo': winner,
-        'combo_digits': cd,
-        'combo_digits_list': cd,
-        'combo_sum': sum(cd),
-        'combo_sum_cat': sum_category(sum(cd)),
-        'combo_sum_category': sum_category(sum(cd)),
-
-        'seed_vtracs': set(VTRAC[d] for d in sd),
-        'combo_vtracs': set(VTRAC[d] for d in cd),
-        'mirror': MIRROR,
-
-        'hot_digits': sorted(hot),
-        'cold_digits': sorted(cold),
-        'due_digits': sorted(due),
-
-        'any': any, 'all': all, 'len': len, 'sum': sum,
-        'max': max, 'min': min, 'set': set, 'sorted': sorted, 'Counter': Counter
-    }
-    return env
-
 
 def build_ctx_for_pool(seed: str, prev_seed: str, prev_prev: str) -> Dict:
     sd = digits_of(seed)
@@ -221,7 +44,14 @@ def build_ctx_for_pool(seed: str, prev_seed: str, prev_prev: str) -> Dict:
         else:
             prev_pattern.extend(['', ''])
 
-    base = {
+    return {
+        'seed_value': int(seed) if seed else None,
+        'seed_sum': sum(sd),
+        'prev_seed_sum': sum(pdigs) if pdigs else None,
+        'prev_prev_seed_sum': sum(ppdigs) if ppdigs else None,
+        'seed_digits_1': pdigs,
+        'seed_digits_2': ppdigs,
+        'nan': float('nan'),
         'seed_digits': sd,
         'prev_seed_digits': pdigs,
         'prev_prev_seed_digits': ppdigs,
@@ -231,7 +61,6 @@ def build_ctx_for_pool(seed: str, prev_seed: str, prev_prev: str) -> Dict:
         'cold_digits': [],
         'due_digits': [d for d in range(10) if d not in pdigs and d not in ppdigs],
         'seed_counts': seed_counts,
-        'seed_sum': sum(sd),
         'prev_sum_cat': prev_sum_cat,
         'seed_vtracs': seed_vtracs,
         'mirror': MIRROR,
@@ -239,8 +68,6 @@ def build_ctx_for_pool(seed: str, prev_seed: str, prev_prev: str) -> Dict:
         'any': any, 'all': all, 'len': len, 'sum': sum,
         'max': max, 'min': min, 'set': set, 'sorted': sorted
     }
-    return base
-
 
 # -----------------------
 # History safety computation
@@ -253,20 +80,18 @@ def hist_safety(app_code, expr_code, winners_list: List[str]) -> Tuple[int, int,
     applicable = 0
     blocked = 0
     for i in range(1, len(winners_list)):
-        ctx = build_day_env(winners_list, i)
+        ctx = build_ctx_for_pool(winners_list[i-1], winners_list[i-2] if i >= 2 else "", winners_list[i-3] if i >= 3 else "")
         try:
             if eval(app_code, ctx, ctx):
                 applicable += 1
                 if eval(expr_code, ctx, ctx):
                     blocked += 1
         except Exception:
-            # treat errors as non-applicable for safety
             pass
     kept = applicable - blocked
     kept_rate = (kept / applicable) if applicable else None
     blocked_rate = (blocked / applicable) if applicable else None
     return applicable, blocked, kept_rate, blocked_rate
-
 
 # -----------------------
 # UI
@@ -274,7 +99,6 @@ def hist_safety(app_code, expr_code, winners_list: List[str]) -> Tuple[int, int,
 
 st.title("Large Filters Planner")
 
-# Mode presets
 mode = st.sidebar.radio(
     "Mode",
     ["Playlist Reducer", "Safe Filter Explorer"],
@@ -300,41 +124,25 @@ with st.sidebar:
     prev_prev = st.text_input("Prev-prev seed (3-back, optional)", value="", max_chars=5).strip()
 
     st.markdown("---")
-    # Paths (defaultable, user can override)
-    filters_path_str = st.text_input("Filters CSV path", value="lottery_filters_batch10.csv",
-                                     help="If you don't paste a filters CSV below, this path will be used.")
-    winners_path_str = st.text_input("Winners CSV (for history)", value="DC5_Midday_Full_Cleaned_Expanded.csv",
-                                     help="Change to the Evening file when needed. If blank, app will try the default above.")
+    filters_path_str = st.text_input("Filters CSV path", value="lottery_filters_batch10.csv")
+    winners_path_str = st.text_input("Winners CSV (for history)", value="DC5_Midday_Full_Cleaned_Expanded.csv")
 
     st.markdown("---")
     st.subheader("Paste/Upload Pools")
-    # Combo pool: paste OR upload
-    pool_text = st.text_area("Paste combos here (one per line)", height=140,
-                             help="If provided, this overrides the pool CSV path/upload.")
-    pool_file = st.file_uploader("Or upload combo pool CSV (must have a 'Result' column)", type=["csv"])\
-
-    st.markdown("---")
-    # Filters: paste OR upload (CSV text)
-    filters_text = st.text_area("Paste filter CSV content (optional)", height=160,
-                                help="Paste the entire CSV content. If provided, overrides the Filters CSV path/upload.")
-    filters_file = st.file_uploader("Or upload filters CSV", type=["csv"])\
+    pool_text = st.text_area("Paste combos here (one per line)", height=140)
+    pool_file = st.file_uploader("Or upload combo pool CSV (must have a 'Result' column)", type=["csv"])
 
     st.markdown("---")
     st.subheader("Large Filter Rules")
-    min_elims = st.number_input("Min eliminations to call it ‘Large’", min_value=1, max_value=99999, value=default_min_elims, step=1)
-    exclude_parity = st.checkbox("Exclude parity-wipers", value=True,
-                                 help="Parity-wiper = wipes all evens or all odds in your pool")
+    min_elims = st.number_input("Min eliminations to call it ‘Large’", min_value=1, max_value=99999, value=default_min_elims)
+    exclude_parity = st.checkbox("Exclude parity-wipers", value=True)
 
-    st.markdown("---")
-    st.subheader("Planner Settings")
-    target_max_bc = st.number_input("Target kept combos (best-case)", min_value=5, max_value=200, value=45, step=1)
-    known_winner = st.text_input("Known winner (5 digits)", value="", max_chars=5).strip()
-    target_max_wp = st.number_input("Target kept combos (winner-preserving)", min_value=5, max_value=200, value=45, step=1)
-    beam_width = st.number_input("Beam width", min_value=1, max_value=20, value=default_beam, step=1)
-    max_steps = st.number_input("Max steps", min_value=1, max_value=50, value=default_steps, step=1)
+# Validate seed
+if not (seed.isdigit() and len(seed) == 5):
+    st.error("Seed must be exactly 5 digits.")
+    st.stop()
 
-    st.markdown("---")
-    run_btn = st.button("Run analysis", type="primary", use_container_width=True)
+# Now your app logic continues exactly as before...
 
 # Validate seed
 if not (seed.isdigit() and len(seed) == 5):
