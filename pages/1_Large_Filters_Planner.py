@@ -337,7 +337,7 @@ st.write(f"**Pool size**: {len(pool)}")
 st.subheader("Winners History (optional)")
 history_path = st.text_input(
     "Path to winners history CSV (leave as default if you like)",
-    value="DC5_Midday_Full_Cleaned_Exp.csv"
+    value="DC5_Midday_Full_Cleaned_Expanded.csv"
 )
 winners_list = load_winners_csv(history_path)
 if not winners_list:
