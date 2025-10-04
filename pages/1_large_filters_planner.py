@@ -1,7 +1,6 @@
-# large_filters_planner_FULL_v2.py
-# Streamlit app: UI-linked Hot/Cold/Due, complete env aliases, mirror helpers,
-# safe builtins, neutral placeholders for applicable_if, skip reporter,
-# and extra forgiving helpers to cut down runtime/type skips.
+# large_filters_planner_FULL_v4.py
+# Streamlit app: robust envs + alias map + safe fallbacks for unknown symbols,
+# H/C/D linked to UI, VTRAC v4 + mirrors, planners, and detailed skip summaries.
 
 from __future__ import annotations
 
@@ -19,26 +18,31 @@ from collections import Counter
 # ==============================
 # Page
 # ==============================
-st.set_page_config(page_title="Large Filters Planner — FULL v2", layout="wide")
-st.title("Large Filters Planner — FULL v2 (UI H/C/D + full env + forgiving helpers)")
+st.set_page_config(page_title="Large Filters Planner — FULL v4", layout="wide")
+st.title("Large Filters Planner — FULL v4")
 
 # ==============================
 # Core maps & helpers
 # ==============================
+# VTRAC v4 (standard)
 VTRAC: Dict[int, int]  = {0:1,5:1, 1:2,6:2, 2:3,7:3, 3:4,8:4, 4:5,9:5}
-V_TRAC_GROUPS: Dict[int, int] = VTRAC  # alias used in some CSVs
+V_TRAC_GROUPS: Dict[int, int] = VTRAC
 
 MIRROR: Dict[int, int] = {0:5,5:0,1:6,6:1,2:7,7:2,3:8,8:3,4:9,9:4}
-mirror = MIRROR  # some CSVs reference lowercase
+mirror = MIRROR
 
 SAFE_BUILTINS = {
-    # builtins
     "abs": abs, "int": int, "str": str, "float": float, "round": round,
     "len": len, "sum": sum, "max": max, "min": min, "any": any, "all": all,
     "set": set, "sorted": sorted, "list": list, "tuple": tuple, "dict": dict,
     "range": range, "enumerate": enumerate, "map": map, "filter": filter,
-    # safe modules/types
     "math": math, "re": re, "random": random, "Counter": Counter,
+    "True": True, "False": False, "None": None,
+}
+
+PY_KEYWORDS = {
+    "and","or","not","in","is","if","else","for","while","return","lambda","def",
+    "True","False","None"
 }
 
 def digits_of(s: str) -> List[int]:
@@ -61,7 +65,6 @@ def classify_structure(digs: List[int]) -> str:
     if counts == [2,1,1,1]: return "double"
     return "single"
 
-# alias some CSVs use
 structure_of = classify_structure
 
 def spread_band(spread: int) -> str:
@@ -109,7 +112,6 @@ def seed_profile(seed: str, prev_seed: str = "", prev_prev: str = "") -> Dict[st
     }
 
 def hot_cold_due(winners_digits: List[List[int]], k: int = 10) -> Tuple[Set[int], Set[int], Set[int]]:
-    """Helper for optional auto-fill when user leaves all H/C/D boxes blank."""
     if not winners_digits:
         return set(), set(), set(range(10))
     hist = winners_digits[-k:] if len(winners_digits) >= k else winners_digits
@@ -129,45 +131,49 @@ def hot_cold_due(winners_digits: List[List[int]], k: int = 10) -> Tuple[Set[int]
     due = set(range(10)) - last2
     return hot, cold, due
 
-# ---- Forgiving helpers to reduce runtime/type skips ----
+# ---- Forgiving helpers ----
 def safe_digits(x):
-    """Return list[int] of all digits in x; empty list if none."""
     try:
         return [int(ch) for ch in str(x) if ch.isdigit()]
     except Exception:
         return []
 
 def digit_sum(x):
-    """Sum of digits in x; 0 if not applicable."""
     ds = safe_digits(x)
     return sum(ds) if ds else 0
 
+def even_count(x):
+    return sum(1 for d in safe_digits(x) if d % 2 == 0)
+
+def odd_count(x):
+    return sum(1 for d in safe_digits(x) if d % 2 == 1)
+
+def high_count(x):
+    return sum(1 for d in safe_digits(x) if d >= 5)
+
+def low_count(x):
+    return sum(1 for d in safe_digits(x) if d <= 4)
+
 def parity_even(n):
-    """True if integer n or digit-sum of string n is even."""
     try:
-        if isinstance(n, int):
-            return (n % 2) == 0
+        if isinstance(n, int): return (n % 2) == 0
         return (digit_sum(n) % 2) == 0
     except Exception:
         return False
 
 def vtrac_of(d):
-    """VTRAC group of a single digit; returns None if invalid."""
     try:
-        d = int(d)
-        return VTRAC[d] if d in VTRAC else None
+        d = int(d); return VTRAC[d] if d in VTRAC else None
     except Exception:
         return None
 
 def vtrac_count(digs):
-    """Number of distinct VTRAC groups across some digits-like input."""
     try:
         return len({VTRAC[int(d)] for d in safe_digits(digs)})
     except Exception:
         return 0
 
 def pair_count(digs):
-    """How many digit values appear at least twice."""
     c = Counter(safe_digits(digs))
     return sum(1 for _, v in c.items() if v >= 2)
 
@@ -175,21 +181,10 @@ def has_pair(digs):
     return pair_count(digs) > 0
 
 def safe_div(a, b):
-    """Division that returns 0 on ZeroDivisionError or invalid inputs."""
     try:
         return float(a) / float(b)
     except Exception:
         return 0.0
-
-# is_hot/is_cold/is_due depend on env hot_set/cold_set/due_set (injected per env)
-def _mk_is_hot(env):
-    return lambda d: (int(d) in env.get("hot_set", set())) if str(d).isdigit() else False
-
-def _mk_is_cold(env):
-    return lambda d: (int(d) in env.get("cold_set", set())) if str(d).isdigit() else False
-
-def _mk_is_due(env):
-    return lambda d: (int(d) in env.get("due_set", set())) if str(d).isdigit() else False
 
 def digits_intersection(a, b):
     return sorted(set(safe_digits(a)) & set(safe_digits(b)))
@@ -197,8 +192,63 @@ def digits_intersection(a, b):
 def digits_union(a, b):
     return sorted(set(safe_digits(a)) | set(safe_digits(b)))
 
+def _mk_is_hot(env):  return lambda d: (str(d).isdigit() and int(d) in env.get("hot_set", set()))
+def _mk_is_cold(env): return lambda d: (str(d).isdigit() and int(d) in env.get("cold_set", set()))
+def _mk_is_due(env):  return lambda d: (str(d).isdigit() and int(d) in env.get("due_set", set()))
+
+def first_digit(x):
+    ds = safe_digits(x); return ds[0] if ds else None
+
+def last_digit(x):
+    ds = safe_digits(x); return ds[-1] if ds else None
+
+def last_two_digits(x):
+    ds = safe_digits(x); return ds[-2:] if len(ds) >= 2 else ds
+
+def unique_count(x):
+    return len(set(safe_digits(x)))
+
+def max_repeat(x):
+    c = Counter(safe_digits(x)); return max(c.values()) if c else 0
+
+def has_triplet(x):
+    return max_repeat(x) >= 3
+
+def digit_span(x):
+    ds = safe_digits(x); return (max(ds) - min(ds)) if ds else 0
+
+def vtrac_span(x):
+    groups = {VTRAC[d] for d in safe_digits(x)}; return (max(groups) - min(groups)) if groups else 0
+
+def contains_mirror_pair(x):
+    s = set(safe_digits(x))
+    return any((d in s and MIRROR[d] in s and MIRROR[d] != d) for d in s)
+
+def count_in_hot(x):  return sum(1 for d in safe_digits(x) if d in hot_set)
+def count_in_cold(x): return sum(1 for d in safe_digits(x) if d in cold_set)
+def count_in_due(x):  return sum(1 for d in safe_digits(x) if d in due_set)
+
+def percent_hot(x):
+    ds = safe_digits(x); return (100.0 * count_in_hot(ds) / len(ds)) if ds else 0.0
+def percent_cold(x):
+    ds = safe_digits(x); return (100.0 * count_in_cold(ds) / len(ds)) if ds else 0.0
+def percent_due(x):
+    ds = safe_digits(x); return (100.0 * count_in_due(ds) / len(ds)) if ds else 0.0
+
+def is_all_high(x):
+    ds = safe_digits(x); return all(d >= 5 for d in ds) if ds else False
+def is_all_low(x):
+    ds = safe_digits(x); return all(d <= 4 for d in ds) if ds else False
+
+def between(v, lo, hi):
+    try:
+        v = float(v); lo = float(lo); hi = float(hi)
+        return lo <= v <= hi
+    except Exception:
+        return False
+
 # ==============================
-# Environments complete
+# Env builders
 # ==============================
 def _make_prev_pattern(pp: List[int], p: List[int], s: List[int]) -> tuple:
     def _pair(digs):
@@ -209,17 +259,15 @@ def _make_prev_pattern(pp: List[int], p: List[int], s: List[int]) -> tuple:
 
 def make_base_env(seed: str, prev_seed: str, prev_prev_seed: str,
                   hot_digits: List[int], cold_digits: List[int], due_digits: List[int]) -> Dict:
-    """Base env for applicable_if and as the parent of combo envs."""
     sd  = digits_of(seed) if seed else []
     sd2 = digits_of(prev_seed) if prev_seed else []
     sd3 = digits_of(prev_prev_seed) if prev_prev_seed else []
 
-    # convenience
     last2 = set(sd) | set(sd2)
     common_to_both = set(sd) & set(sd2)
 
     env = {
-        # seed & history context
+        # seed & history
         "seed_digits": sd, "prev_seed_digits": sd2, "prev_prev_seed_digits": sd3,
         "seed_digits_1": sd2, "seed_digits_2": sd3, "seed_digits_3": [],
         "new_seed_digits": list(set(sd) - set(sd2)),
@@ -229,69 +277,55 @@ def make_base_env(seed: str, prev_seed: str, prev_prev_seed: str,
         "prev_pattern": _make_prev_pattern(sd3, sd2, sd),
         "common_to_both": common_to_both, "last2": last2,
 
-        # core maps
+        # maps
         "VTRAC": VTRAC, "V_TRAC_GROUPS": V_TRAC_GROUPS,
         "mirror": MIRROR, "MIRROR": MIRROR,
 
-        # Temperature lists and aliases — DIRECT from UI
-        "hot_digits": sorted(set(hot_digits)),
-        "cold_digits": sorted(set(cold_digits)),
-        "due_digits":  sorted(set(due_digits)),
-        "hot":  sorted(set(hot_digits)),
-        "cold": sorted(set(cold_digits)),
-        "due":  sorted(set(due_digits)),
-
-        # Sets for fast membership & is_hot/is_cold/is_due
+        # H/C/D from UI
+        "hot_digits": sorted(set(hot_digits)), "cold_digits": sorted(set(cold_digits)), "due_digits": sorted(set(due_digits)),
+        "hot": sorted(set(hot_digits)), "cold": sorted(set(cold_digits)), "due": sorted(set(due_digits)),
         "hot_set": set(hot_digits), "cold_set": set(cold_digits), "due_set": set(due_digits),
 
-        # Mirror helpers and precomputed mirror sets
+        # mirror helpers
         "mirror_of": (lambda d: MIRROR.get(int(d), int(d)) if str(d).isdigit() else d),
         "seed_mirror_digits": sorted({MIRROR[d] for d in sd}) if sd else [],
 
-        # Builtins whitelist (safe)
+        # builtins
         **SAFE_BUILTINS,
 
-        # Neutral placeholders so applicable_if can reference combo_* safely
-        "combo": "",
-        "combo_digits": [],
-        "combo_digits_list": [],
-        "combo_set": set(),
-        "combo_sum": 0,
-        "combo_sum_cat": sum_category(0),
-        "combo_sum_is_even": False,
-        "combo_vtracs": set(),
-        "combo_mirror_digits": [],
-        "combo_structure": "single",
-        "combo_last_digit": None,
-        "spread": 0,
+        # combo placeholders
+        "combo": "", "combo_digits": [], "combo_digits_list": [], "combo_set": set(),
+        "combo_sum": 0, "combo_sum_cat": sum_category(0), "combo_sum_is_even": False,
+        "combo_vtracs": set(), "combo_mirror_digits": [], "combo_structure": "single",
+        "combo_last_digit": None, "spread": 0,
         "seed_spread": (max(sd) - min(sd)) if sd else 0,
-        "has_mirror_pair": False,
-        "mirror_pair_count": 0,
-        "mirror_pairs": set(),
+        "has_mirror_pair": False, "mirror_pair_count": 0, "mirror_pairs": set(),
         "mirror_overlap_with_seed": 0,
 
         # helpers
         "sum_category": sum_category, "structure_of": structure_of,
         "safe_digits": safe_digits, "digit_sum": digit_sum, "parity_even": parity_even,
         "vtrac_of": vtrac_of, "vtrac_count": vtrac_count,
-        "pair_count": pair_count, "has_pair": has_pair,
-        "safe_div": safe_div,
-        # is_* are injected after env creation because they close over env sets
-        # digits set ops
+        "pair_count": pair_count, "has_pair": has_pair, "safe_div": safe_div,
         "digits_intersection": digits_intersection, "digits_union": digits_union,
+        "first_digit": first_digit, "last_digit": last_digit, "last_two_digits": last_two_digits,
+        "unique_count": unique_count, "max_repeat": max_repeat, "has_triplet": has_triplet,
+        "digit_span": digit_span, "vtrac_span": vtrac_span, "contains_mirror_pair": contains_mirror_pair,
+        "count_in_hot": count_in_hot, "count_in_cold": count_in_cold, "count_in_due": count_in_due,
+        "percent_hot": percent_hot, "percent_cold": percent_cold, "percent_due": percent_due,
+        "even_count": even_count, "odd_count": odd_count, "high_count": high_count, "low_count": low_count,
+        "is_all_high": is_all_high, "is_all_low": is_all_low, "between": between,
 
         "seed_value": int(seed) if (seed and seed.isdigit()) else None,
         "nan": float('nan'),
         "winner_structure": classify_structure(sd) if sd else "",
     }
-    # Late-bind dependent helpers
     env["is_hot"]  = _mk_is_hot(env)
     env["is_cold"] = _mk_is_cold(env)
     env["is_due"]  = _mk_is_due(env)
     return env
 
 def combo_env(base_env: Dict, combo: str) -> Dict:
-    """Per-combo env inherits base env and augments with combo_* details."""
     cd = digits_of(combo)
     env = dict(base_env)
     cset = set(cd)
@@ -314,22 +348,18 @@ def combo_env(base_env: Dict, combo: str) -> Dict:
         "combo_vtracs": set(VTRAC[d] for d in cd),
         "combo_structure": classify_structure(cd),
         "combo_last_digit": cd[-1] if cd else None,
-
         "spread": (max(cd) - min(cd)) if cd else 0,
-        "seed_spread": (max(base_env["seed_digits"]) - min(base_env["seed_digits"])) if base_env["seed_digits"] else 0,
-
+        "seed_spread": (max(env.get("seed_digits", [0])) - min(env.get("seed_digits", [0]))) if env.get("seed_digits") else 0,
         "combo_mirror_digits": combo_mirror_digits,
         "has_mirror_pair": has_mirror_pair,
         "mirror_pairs": mirror_pairs,
         "mirror_pair_count": mirror_pair_count,
         "mirror_overlap_with_seed": mirror_overlap_with_seed,
 
-        # keep H/C/D sets in per-combo env for is_* helpers
         "hot_set": set(env.get("hot_digits", [])),
         "cold_set": set(env.get("cold_digits", [])),
         "due_set": set(env.get("due_digits", [])),
     })
-    # refresh closures
     env["is_hot"]  = _mk_is_hot(env)
     env["is_cold"] = _mk_is_cold(env)
     env["is_due"]  = _mk_is_due(env)
@@ -337,11 +367,8 @@ def combo_env(base_env: Dict, combo: str) -> Dict:
 
 def build_day_env(winners_list: List[str], i: int,
                   hot_digits: List[int], cold_digits: List[int], due_digits: List[int]) -> Dict:
-    """History safety env — uses THE SAME H/C/D lists as the UI (no hidden auto)."""
-    seed = winners_list[i-1]
-    winner = winners_list[i]
-    sd = digits_of(seed)
-    cd = digits_of(winner)
+    seed = winners_list[i-1]; winner = winners_list[i]
+    sd = digits_of(seed); cd = digits_of(winner)
 
     prev_seed = winners_list[i-2] if i-2 >= 0 else ""
     prev_prev = winners_list[i-3] if i-3 >= 0 else ""
@@ -352,7 +379,7 @@ def build_day_env(winners_list: List[str], i: int,
 
     cset = set(cd)
     combo_mirror_digits = sorted({MIRROR[d] for d in cd}) if cd else []
-    seed_mirror_digits = sorted({MIRROR[d] for d in sd}) if sd else []
+    seed_mirror_digits  = sorted({MIRROR[d] for d in sd}) if sd else []
     mirror_pairs = {tuple(sorted((d, MIRROR[d]))) for d in cset if MIRROR[d] in cset and MIRROR[d] != d}
     mirror_pair_count = len(mirror_pairs)
     has_mirror_pair = mirror_pair_count > 0
@@ -362,14 +389,12 @@ def build_day_env(winners_list: List[str], i: int,
     common_to_both = set(sd) & set(pdigs)
 
     env = {
-        # seed & prevs
         'seed_digits': sd, 'prev_seed_digits': pdigs, 'prev_prev_seed_digits': ppdigs,
         'seed_digits_1': pdigs, 'seed_digits_2': ppdigs, 'seed_digits_3': [],
         'new_seed_digits': list(set(sd) - set(pdigs)), 'seed_counts': Counter(sd),
         'seed_sum': sum(sd), 'prev_sum_cat': sum_category(sum(sd)), 'prev_pattern': tuple(prev_pattern),
         'seed_vtracs': set(VTRAC[d] for d in sd),
 
-        # winner as "combo" for the day
         'combo': winner, 'combo_digits': sorted(cd), 'combo_digits_list': sorted(cd),
         'combo_set': cset, 'combo_sum': sum(cd), 'combo_sum_cat': sum_category(sum(cd)),
         'combo_sum_is_even': (sum(cd) % 2 == 0),
@@ -377,14 +402,10 @@ def build_day_env(winners_list: List[str], i: int,
         'combo_structure': classify_structure(cd),
         'combo_last_digit': cd[-1] if cd else None,
 
-        # mirrors/vtrac maps
         'mirror': MIRROR, 'MIRROR': MIRROR, 'VTRAC': VTRAC, 'V_TRAC_GROUPS': V_TRAC_GROUPS,
 
-        # use UI H/C/D here too
         'hot_digits': sorted(set(hot_digits)), 'cold_digits': sorted(set(cold_digits)), 'due_digits': sorted(set(due_digits)),
         'hot': sorted(set(hot_digits)), 'cold': sorted(set(cold_digits)), 'due': sorted(set(due_digits)),
-
-        # sets for is_* helpers
         'hot_set': set(hot_digits), 'cold_set': set(cold_digits), 'due_set': set(due_digits),
 
         'mirror_of': (lambda d: MIRROR.get(int(d), int(d)) if str(d).isdigit() else d),
@@ -392,28 +413,32 @@ def build_day_env(winners_list: List[str], i: int,
         'has_mirror_pair': has_mirror_pair, 'mirror_pairs': mirror_pairs,
         'mirror_pair_count': mirror_pair_count, 'mirror_overlap_with_seed': mirror_overlap_with_seed,
 
-        # convenience
         'common_to_both': common_to_both, 'last2': last2,
         'spread': (max(cd) - min(cd)) if cd else 0, 'seed_spread': (max(sd) - min(sd)) if sd else 0,
 
-        # builtins + helpers
         **SAFE_BUILTINS, 'sum_category': sum_category, 'structure_of': structure_of,
         'safe_digits': safe_digits, 'digit_sum': digit_sum, 'parity_even': parity_even,
         'vtrac_of': vtrac_of, 'vtrac_count': vtrac_count, 'pair_count': pair_count,
         'has_pair': has_pair, 'safe_div': safe_div,
         'digits_intersection': digits_intersection, 'digits_union': digits_union,
+        'first_digit': first_digit, 'last_digit': last_digit, 'last_two_digits': last_two_digits,
+        'unique_count': unique_count, 'max_repeat': max_repeat, 'has_triplet': has_triplet,
+        'digit_span': digit_span, 'vtrac_span': vtrac_span, 'contains_mirror_pair': contains_mirror_pair,
+        'count_in_hot': count_in_hot, 'count_in_cold': count_in_cold, 'count_in_due': count_in_due,
+        'percent_hot': percent_hot, 'percent_cold': percent_cold, 'percent_due': percent_due,
+        'even_count': even_count, 'odd_count': odd_count, 'high_count': high_count, 'low_count': low_count,
+        'is_all_high': is_all_high, 'is_all_low': is_all_low, 'between': between,
 
         'seed_value': int(seed) if seed.isdigit() else None, 'nan': float('nan'),
         'winner_structure': classify_structure(sd),
     }
-    # Late-bind is_* closures
     env['is_hot']  = _mk_is_hot(env)
     env['is_cold'] = _mk_is_cold(env)
     env['is_due']  = _mk_is_due(env)
     return env
 
 # ==============================
-# CSV loaders (pool, winners, filters) — tolerant
+# CSV loaders
 # ==============================
 @st.cache_data(show_spinner=False)
 def load_winners_csv_from_path(path_or_buf) -> List[str]:
@@ -426,8 +451,7 @@ def load_winners_csv_from_path(path_or_buf) -> List[str]:
 
 def load_pool_from_text_or_csv(text: str, col_hint: str) -> List[str]:
     text = text.strip()
-    if not text:
-        return []
+    if not text: return []
     looks_csv = ("," in text and "\n" in text) or text.lower().startswith("result")
     if looks_csv:
         try:
@@ -485,7 +509,6 @@ def normalize_filters_df(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 def load_filters_from_source(pasted_csv_text: str, uploaded_csv_file, csv_path: str) -> pd.DataFrame:
-    # If pasted text looks like a real CSV with an expression column, use it.
     if pasted_csv_text and pasted_csv_text.strip():
         try:
             tmp = pd.read_csv(io.StringIO(pasted_csv_text), engine="python")
@@ -500,80 +523,77 @@ def load_filters_from_source(pasted_csv_text: str, uploaded_csv_file, csv_path: 
     return normalize_filters_df(df)
 
 # ==============================
-# Error helpers for skip reporting
+# Missing symbol handling
 # ==============================
-def _missing_name_from_exc(err: Exception) -> Optional[str]:
-    m = re.search(r"name '([^']+)' is not defined", str(err))
-    if m: return m.group(1)
-    return None
+def parse_alias_lines(text: str) -> Dict[str, str]:
+    """
+    Parse lines like:
+      name = expression
+    Returns dict name->expression (string). Blank/comment lines ignored.
+    """
+    out = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"): continue
+        if "=" not in line: continue
+        name, expr = line.split("=", 1)
+        name = name.strip()
+        expr = expr.strip()
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", name) and expr:
+            out[name] = expr
+    return out
 
-def eval_applicable_with_error(applicable_if: str, base_env: Dict, fid: str, name: str, skip_log: List[dict]) -> bool:
-    try:
-        code = compile(str(applicable_if), "<applicable_if>", "eval")
-    except Exception as e:
-        skip_log.append({"filter_id": fid, "name": name, "stage": "applicable_if_compile", "error": str(e), "missing": _missing_name_from_exc(e)})
-        return True
-    try:
-        return bool(eval(code, {"__builtins__": {}}, {**SAFE_BUILTINS, **base_env}))
-    except Exception as e:
-        skip_log.append({"filter_id": fid, "name": name, "stage": "applicable_if_eval", "error": str(e), "missing": _missing_name_from_exc(e)})
-        return True
-
-def eval_filter_on_pool_with_errors(row: pd.Series, pool: List[str], base_env: Dict, skip_log: List[dict]) -> Tuple[Set[str], int, int, int]:
-    expr = str(row["expression"]); fid = str(row["id"]); name = str(row.get("name",""))
-    try:
-        code = compile(expr, "<filter_expr>", "eval")
-    except Exception as e:
-        skip_log.append({"filter_id": fid, "name": name, "stage": "expr_compile", "error": str(e), "missing": _missing_name_from_exc(e)})
-        return set(), 0, 0, 0
-
-    eliminated: Set[str] = set()
-    elim_even = elim_odd = 0
-    for c in pool:
-        env = combo_env(base_env, c)
+def build_alias_env(alias_map: Dict[str, str], base_env: Dict) -> Dict[str, object]:
+    """
+    Evaluate RHS expressions of alias_map in a SAFE context and return name->value.
+    If an RHS uses names, it can reference helpers already in base_env.
+    """
+    out = {}
+    for name, expr in alias_map.items():
         try:
-            if bool(eval(code, {"__builtins__": {}}, {**SAFE_BUILTINS, **env})):
-                eliminated.add(c)
-                if env["combo_sum_is_even"]: elim_even += 1
-                else:                        elim_odd  += 1
-        except Exception as e:
-            skip_log.append({"filter_id": fid, "name": name, "stage": "expr_eval", "combo": c, "error": str(e), "missing": _missing_name_from_exc(e)})
-    return eliminated, len(eliminated), elim_even, elim_odd
-
-def safety_on_history_with_errors(expr: str, winners_list: List[str], sd_now: List[int],
-                                  fid: str, name: str, skip_log: List[dict],
-                                  hot_digits: List[int], cold_digits: List[int], due_digits: List[int]) -> Tuple[Optional[float], int, int]:
-    if not winners_list or len(winners_list) < 2:
-        return None, 0, 0
-    try:
-        code = compile(str(expr), "<hist_expr>", "eval")
-    except Exception as e:
-        skip_log.append({"filter_id": fid, "name": name, "stage": "history_compile", "error": str(e), "missing": _missing_name_from_exc(e)})
-        return None, 0, 0
-    total_sim, bad_hits = 0, 0
-    for i in range(1, len(winners_list)):
-        env = build_day_env(winners_list, i, hot_digits, cold_digits, due_digits)
-        if not similar_seed(env["seed_digits"], sd_now):
+            code = compile(expr, f"<alias:{name}>", "eval")
+            val = eval(code, {"__builtins__": {}}, {**SAFE_BUILTINS, **base_env})
+            out[name] = val
+        except Exception:
+            # If the alias RHS fails, leave it out; it will be logged if referenced.
             continue
-        total_sim += 1
-        try:
-            if bool(eval(code, {"__builtins__": {}}, {**SAFE_BUILTINS, **env})):
-                bad_hits += 1
-        except Exception as e:
-            skip_log.append({"filter_id": fid, "name": name, "stage": "history_eval", "day_index": i, "error": str(e), "missing": _missing_name_from_exc(e)})
-    if total_sim == 0:
-        return None, 0, 0
-    safety = 100.0 * (1.0 - bad_hits / total_sim)
-    return safety, total_sim, bad_hits
+    return out
+
+NAME_PATTERN = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\b")
+
+def discover_unknown_names(expr: str, env: Dict[str, object]) -> Set[str]:
+    """
+    Find tokens that look like identifiers in expr but are not in env/builtins/keywords.
+    """
+    names = set(NAME_PATTERN.findall(expr))
+    known = set(env.keys()) | set(SAFE_BUILTINS.keys()) | PY_KEYWORDS
+    # Also consider numbers and booleans literals not identifiers
+    unknown = {n for n in names if n not in known}
+    return unknown
+
+def make_placeholders(unknown: Set[str]) -> Dict[str, object]:
+    """
+    Create safe placeholders for unknown names:
+      - as values: 0
+      - as callables: lambda *a, **k: False
+    We don't know which way they'll be used, so give both by returning a callable
+    that is False-y and numeric 0 when coerced. Easiest: a small object with __bool__ and __float__.
+    """
+    class _Stub:
+        def __call__(self, *a, **k): return False
+        def __bool__(self): return False
+        def __float__(self): return 0.0
+        def __int__(self): return 0
+        def __repr__(self): return "/*auto_stub*/0"
+    stub = _Stub()
+    return {name: stub for name in unknown}
 
 # ==============================
 # Similarity & flags
 # ==============================
 def similar_seed(sd_hist: List[int], sd_now: List[int]) -> bool:
-    if not sd_now or not sd_hist:
-        return True
-    f_hist = seed_features(sd_hist)
-    f_now  = seed_features(sd_now)
+    if not sd_now or not sd_hist: return True
+    f_hist = seed_features(sd_hist); f_now = seed_features(sd_now)
     match_count = sum(1 for a, b in zip(f_hist, f_now) if a == b and a != "")
     return match_count >= 2
 
@@ -588,21 +608,17 @@ def is_seed_specific(text: str) -> bool:
 def _first_col(df: pd.DataFrame, cand: List[str]) -> Optional[str]:
     lc = {c.lower(): c for c in df.columns}
     for x in cand:
-        if x.lower() in lc:
-            return lc[x.lower()]
+        if x.lower() in lc: return lc[x.lower()]
     return None
 
 def load_archetype_dimension_lifts(csv_path: Path) -> Optional[pd.DataFrame]:
-    if not csv_path.exists():
-        return None
+    if not csv_path.exists(): return None
     try:
         df = pd.read_csv(csv_path, engine="python")
         fid = _first_col(df, ["filter_id","fid","id"])
         dim = _first_col(df, ["dimension","dim","feature","trait_name"])
         val = _first_col(df, ["value","trait","bucket","bin"])
-        lift = None
-        for c in df.columns:
-            if "lift" in c.lower(): lift = c; break
+        lift = next((c for c in df.columns if "lift" in c.lower()), None)
         kept = _first_col(df, ["kept_rate","kept%","kept_pct"])
         base = _first_col(df, ["baseline_kept_rate","baseline_kept%","baseline_pct"])
         supp = _first_col(df, ["applicable_days","support","n","days","app_days"])
@@ -613,8 +629,7 @@ def load_archetype_dimension_lifts(csv_path: Path) -> Optional[pd.DataFrame]:
                 lift = "__lift_tmp__"
             else:
                 return None
-        use_cols = [fid, dim, val, lift]
-        if supp: use_cols.append(supp)
+        use_cols = [fid, dim, val, lift] + ([supp] if supp else [])
         out = df[use_cols].dropna().copy()
         out.columns = ["filter_id","dimension","value","lift"] + (["support"] if supp else [])
         out["filter_id"] = out["filter_id"].astype(str).str.strip()
@@ -642,8 +657,7 @@ def current_traits_for_match(prof: Dict[str, object]) -> Dict[str, List[str]]:
 def compute_expected_safety_map(df_for_map: pd.DataFrame, arch_df: Optional[pd.DataFrame], prof: Dict[str, object]) -> Dict[str, float]:
     base_map = {}
     for _, r in df_for_map.iterrows():
-        fid = str(r["id"])
-        kept = r.get("historic_safety_pct")
+        fid = str(r["id"]); kept = r.get("historic_safety_pct")
         base_map[fid] = float(kept)/100.0 if pd.notna(kept) else 0.5
     if arch_df is None or arch_df.empty:
         return {fid: max(0.05, min(0.99, base_map.get(fid, 0.5))) for fid in base_map}
@@ -652,27 +666,18 @@ def compute_expected_safety_map(df_for_map: pd.DataFrame, arch_df: Optional[pd.D
     out = {}
     for fid, base in base_map.items():
         sub = by_f.get(str(fid))
-        if sub is None or sub.empty:
-            out[fid] = max(0.05, min(0.99, base))
-            continue
+        if sub is None or sub.empty: out[fid] = max(0.05, min(0.99, base)); continue
         lifts = []
         for _, row in sub.iterrows():
-            dim = str(row["dimension"]).lower()
-            val = str(row["value"])
+            dim = str(row["dimension"]).lower(); val = str(row["value"])
             if dim in trait_dict and any(val == v for v in trait_dict[dim]):
-                L = float(row["lift"])
-                L = max(0.7, min(1.3, L))
-                lifts.append(L)
-        if lifts:
-            gm = math.exp(sum(math.log(x) for x in lifts) / len(lifts))
-            expected = base * gm
-        else:
-            expected = base
+                L = float(row["lift"]); L = max(0.7, min(1.3, L)); lifts.append(L)
+        expected = base * (math.exp(sum(math.log(x) for x in lifts) / len(lifts)) if lifts else 1.0)
         out[fid] = max(0.05, min(0.99, expected))
     return out
 
 # ==============================
-# Planners
+# Planners (same as v3)
 # ==============================
 def greedy_plan(candidates: pd.DataFrame, pool: List[str], base_env: Dict, beam_width: int, max_steps: int, mode: str, exp_map_for_greedy: Dict[str, float]) -> Tuple[List[Dict], List[str]]:
     remaining = set(pool); chosen: List[Dict] = []
@@ -681,13 +686,8 @@ def greedy_plan(candidates: pd.DataFrame, pool: List[str], base_env: Dict, beam_
         scored = []
         for _, r in candidates.iterrows():
             elim, cnt, _, _ = eval_filter_on_pool_with_errors(r, list(remaining), base_env, skip_log=[])
-            if cnt <= 0:
-                continue
-            if mode == "Safe Filter Explorer":
-                w = float(exp_map_for_greedy.get(str(r["id"]), 0.5))
-                score = cnt * (0.25 + 0.75 * w)
-            else:
-                score = cnt
+            if cnt <= 0: continue
+            score = cnt * (0.25 + 0.75 * float(exp_map_for_greedy.get(str(r["id"]), 0.5))) if mode == "Safe Filter Explorer" else cnt
             scored.append((score, cnt, elim, r))
         if not scored: break
         scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
@@ -710,15 +710,13 @@ def best_case_plan_no_winner(large_df, E_map, names_map, pool_len, target_max, e
             if elim_now <= 0: continue
             w = float(exp_safety_map.get(fid, 0.5))
             score = elim_now * (0.25 + 0.75 * w)
-            if score > best_score:
-                best_score = score; best = (fid, elim_now, w)
+            if score > best_score: best_score = score; best = (fid, elim_now, w)
         if best is None: break
         fid, elim_now, w = best
         P = P - E_map[fid]; used.add(fid)
         steps.append({"filter_id": fid, "name": names_map.get(fid, ""), "eliminated_now": elim_now,
                       "remaining_after": len(P), "expected_safety_%": round(100.0 * w, 2)})
-    if steps: return {"steps": steps, "final_pool_idx": P}
-    return None
+    return {"steps": steps, "final_pool_idx": P} if steps else None
 
 def winner_preserving_plan(large_df, E_map, names_map, pool_len, winner_idx, target_max=45, beam_width=3, max_steps=12):
     P0 = set(range(pool_len))
@@ -761,8 +759,7 @@ def winner_preserving_plan(large_df, E_map, names_map, pool_len, winner_idx, tar
             dfs(newP, used | {fid}, log + [step], depth+1)
 
     dfs(P0, set(), [], 0)
-    if best["steps"] and len(best["pool"]) < len(P0): return {"steps": best["steps"], "final_pool_idx": best["pool"]}
-    return None
+    return {"steps": best["steps"], "final_pool_idx": best["pool"]} if best["steps"] and len(best["pool"]) < len(P0) else None
 
 # ==============================
 # Sidebar
@@ -793,7 +790,7 @@ with st.sidebar:
     steps_wp = st.number_input("WP max steps", min_value=1, max_value=50, value=12, step=1)
 
 # ==============================
-# Seed context & Hot/Cold/Due
+# Seed / HCD
 # ==============================
 st.subheader("Seed Context")
 c1, c2, c3 = st.columns(3)
@@ -812,8 +809,8 @@ auto_hcd = st.checkbox("Only if ALL boxes are blank: auto-fill Hot/Cold/Due from
 # Combo Pool
 # ==============================
 st.subheader("Combo Pool")
-pool_text = st.text_area("Paste combos (CSV w/ 'Result' column OR tokens separated by newline/space/comma):", height=140)
-pool_file = st.file_uploader("Or upload combo pool CSV ('Result' or 'combo' column)", type=["csv"])
+pool_text = st.text_area("Paste combos (CSV ‘Result’ column OR tokens separated by newline/space/comma):", height=140)
+pool_file = st.file_uploader("Or upload pool CSV (‘Result’ or ‘combo’ column)", type=["csv"])
 pool_col_hint = st.text_input("Pool column name hint (default 'Result')", value="Result")
 
 pool: List[str] = []
@@ -834,10 +831,10 @@ pool = [p for p in pool if p]
 st.write(f"**Pool size:** {len(pool)}")
 
 # ==============================
-# Winners history CSV
+# Winners
 # ==============================
 st.subheader("Winners History")
-hc1, hc2 = st.columns([2, 1])
+hc1, hc2 = st.columns([2,1])
 history_path = hc1.text_input("Path to winners history CSV", value="DC5_Midday_Full_Cleaned_Expanded.csv")
 history_upload = hc2.file_uploader("Or upload history CSV", type=["csv"], key="hist_up")
 
@@ -846,14 +843,13 @@ if history_upload is not None:
     try:
         winners_list = load_winners_csv_from_path(history_upload)
     except Exception as e:
-        st.warning(f"Uploaded history CSV failed to read: {e}. Will try path.")
+        st.warning(f"Uploaded history CSV failed: {e}. Will try path.")
 if not winners_list:
     try:
         winners_list = load_winners_csv_from_path(history_path)
     except Exception as e:
         st.warning(f"History path failed: {e}. Continuing without history safety.")
 
-# H/C/D linkage guarantee:
 user_provided_hcd = bool(hot_digits or cold_digits or due_digits)
 if not user_provided_hcd and auto_hcd and winners_list:
     AUTO_WINDOW = 10
@@ -880,7 +876,6 @@ try:
 except Exception as e:
     st.error(f"Failed to load Filters CSV ➜ {e}"); st.stop()
 
-# If the "CSV content" box actually contains just IDs, include them too:
 if filters_pasted_csv and "expression" not in filters_pasted_csv.split("\n", 1)[0].lower():
     fids_text = (fids_text + "," + filters_pasted_csv) if fids_text else filters_pasted_csv
 
@@ -897,28 +892,147 @@ if "enabled" in filters_df.columns:
     enabled_norm = filters_df["enabled"].apply(lambda v: str(v).strip().lower() in ("1","true","t","yes","y"))
     filters_df = filters_df[enabled_norm].copy()
 
-st.write(f"**Filters loaded (pre-eval): {len(filters_df)}**")
+st.write(f"**Filters loaded (pre-eval): {len(filters_df)}")
 if len(filters_df) == 0:
-    st.warning("0 filters available. Check the CSV path/content, 'enabled' values, expression quoting, or your ID selection.")
+    st.warning("0 filters available. Check CSV path/content, 'enabled' values, expressions, or ID selection.")
     st.stop()
+
+# ==============================
+# Missing symbol UI
+# ==============================
+st.subheader("Missing Symbols • Aliases & Fallbacks")
+alias_col, fallback_col = st.columns([2,1])
+
+with alias_col:
+    alias_text = st.text_area(
+        "Alias map (one per line:  name = expression )",
+        help="Examples:  my_hot = hot_digits\nis_hotdigit = is_hot\nvtrac_id = vtrac_of(combo_last_digit)",
+        height=120
+    )
+    alias_upload = st.file_uploader("Or upload alias CSV (columns: name, expression)", type=["csv"], key="alias_up")
+
+alias_map = parse_alias_lines(alias_text) if alias_text else {}
+if alias_upload is not None:
+    try:
+        adf = pd.read_csv(alias_upload)
+        if {"name","expression"}.issubset(set(c.lower() for c in adf.columns.map(str))):
+            lc = {c.lower(): c for c in adf.columns}
+            for _, r in adf.iterrows():
+                nm = str(r[lc["name"]]).strip()
+                ex = str(r[lc["expression"]]).strip()
+                if nm and ex: alias_map[nm] = ex
+    except Exception:
+        st.warning("Alias CSV unreadable; ignoring.")
+
+with fallback_col:
+    auto_stub_unknowns = st.checkbox("Treat still-unknown symbols as safe False/0 (recommended)", value=True)
 
 # ==============================
 # RUN
 # ==============================
-run = st.button("▶ Run Planner + Recommender", type="primary", use_container_width=False)
+run = st.button("▶ Run Planner + Recommender", type="primary")
 if not run:
     st.stop()
 
 # ==============================
-# Build base env & evaluate
+# Build base env & aliases
 # ==============================
 base_env = make_base_env(seed, prev_seed, prev_prev, hot_digits, cold_digits, due_digits)
 
-st.info(
-    f"Using Hot/Cold/Due in ALL evaluations → hot={hot_digits} • cold={cold_digits} • due={due_digits}",
-    icon="🔥"
-)
+# Evaluate alias RHS now (in base env)
+alias_values = build_alias_env(alias_map, base_env)
+if alias_values:
+    base_env.update(alias_values)
+    st.caption(f"Applied {len(alias_values)} alias definitions.")
 
+st.info(f"Using Hot/Cold/Due everywhere → hot={hot_digits} • cold={cold_digits} • due={due_digits}", icon="🔥")
+
+# ==============================
+# Evaluation helpers (with alias + fallback)
+# ==============================
+def _missing_name_from_exc(err: Exception) -> Optional[str]:
+    m = re.search(r"name '([^']+)' is not defined", str(err))
+    if m: return m.group(1)
+    return None
+
+def compile_with_placeholders(expr: str, env: Dict, skip_log: List[dict], fid: str, name: str, stage_prefix: str):
+    # First try compile; if NameError happens at eval later, we can patch.
+    try:
+        code = compile(str(expr), f"<{stage_prefix}>", "eval")
+        return code, {}
+    except Exception as e:
+        # Most compile errors are syntax; record and return None.
+        skip_log.append({"filter_id": fid, "name": name, "stage": f"{stage_prefix}_compile", "error": str(e), "missing": _missing_name_from_exc(e)})
+        return None, {}
+
+def ensure_placeholders(expr: str, env: Dict, allow_auto: bool, recorded: List[dict], fid: str, name: str) -> Dict[str, object]:
+    if not allow_auto: return {}
+    unknown = discover_unknown_names(expr, env)
+    if not unknown: return {}
+    ph = make_placeholders(unknown)
+    for n in sorted(unknown):
+        recorded.append({"filter_id": fid, "name": name, "stage": "auto_placeholder", "error": "", "missing": n})
+    return ph
+
+def eval_expr(expr: str, env: Dict, skip_log: List[dict], fid: str, name: str, stage_prefix: str, allow_auto=True) -> Optional[bool]:
+    code, _ = compile_with_placeholders(expr, env, skip_log, fid, name, stage_prefix)
+    if code is None: return None
+    # Inject placeholders for still-unknown names before eval
+    placeholders = ensure_placeholders(expr, env, allow_auto, skip_log, fid, name)
+    try:
+        return bool(eval(code, {"__builtins__": {}}, {**SAFE_BUILTINS, **env, **placeholders}))
+    except Exception as e:
+        # If NameError appears here, try one more time with placeholders
+        miss = _missing_name_from_exc(e)
+        if miss and allow_auto:
+            more = make_placeholders({miss})
+            try:
+                return bool(eval(code, {"__builtins__": {}}, {**SAFE_BUILTINS, **env, **placeholders, **more}))
+            except Exception as e2:
+                skip_log.append({"filter_id": fid, "name": name, "stage": f"{stage_prefix}_eval", "error": str(e2), "missing": _missing_name_from_exc(e2)})
+                return None
+        skip_log.append({"filter_id": fid, "name": name, "stage": f"{stage_prefix}_eval", "error": str(e), "missing": miss})
+        return None
+
+def eval_applicable_with_error(applicable_if: str, base_env: Dict, fid: str, name: str, skip_log: List[dict], allow_auto=True) -> bool:
+    res = eval_expr(str(applicable_if), base_env, skip_log, fid, name, "applicable_if", allow_auto=allow_auto)
+    if res is None:
+        # On error we treat as applicable (don't block evaluation completely)
+        return True
+    return bool(res)
+
+def eval_filter_on_pool_with_errors(row: pd.Series, pool: List[str], base_env: Dict, skip_log: List[dict], allow_auto=True) -> Tuple[Set[str], int, int, int]:
+    expr = str(row["expression"]); fid = str(row["id"]); name = str(row.get("name",""))
+    eliminated: Set[str] = set(); elim_even = elim_odd = 0
+    for c in pool:
+        env = combo_env(base_env, c)
+        ok = eval_expr(expr, env, skip_log, fid, name, "expr", allow_auto=allow_auto)
+        if ok is True:
+            eliminated.add(c)
+            if env["combo_sum_is_even"]: elim_even += 1
+            else: elim_odd += 1
+    return eliminated, len(eliminated), elim_even, elim_odd
+
+def safety_on_history_with_errors(expr: str, winners_list: List[str], sd_now: List[int],
+                                  fid: str, name: str, skip_log: List[dict],
+                                  hot_digits: List[int], cold_digits: List[int], due_digits: List[int],
+                                  allow_auto=True) -> Tuple[Optional[float], int, int]:
+    if not winners_list or len(winners_list) < 2: return None, 0, 0
+    total_sim, bad_hits = 0, 0
+    for i in range(1, len(winners_list)):
+        env = build_day_env(winners_list, i, hot_digits, cold_digits, due_digits)
+        if not similar_seed(env["seed_digits"], sd_now): continue
+        total_sim += 1
+        ok = eval_expr(expr, env, skip_log, fid, name, "history", allow_auto=allow_auto)
+        if ok is True:
+            bad_hits += 1
+    if total_sim == 0: return None, 0, 0
+    safety = 100.0 * (1.0 - bad_hits / total_sim)
+    return safety, total_sim, bad_hits
+
+# ==============================
+# Evaluate
+# ==============================
 st.subheader("Evaluating filters on current pool…")
 rows = []; E_map: Dict[str, Set[int]] = {}; names_map: Dict[str, str] = {}
 pool_digits = [digits_of(s) for s in pool]
@@ -927,14 +1041,14 @@ skip_log: List[dict] = []
 
 for _, r in filters_df.iterrows():
     fid = str(r["id"]); nm = str(r.get("name",""))
-    if not eval_applicable_with_error(r.get("applicable_if", "True"), base_env, fid, nm, skip_log):
+    if not eval_applicable_with_error(r.get("applicable_if", "True"), base_env, fid, nm, skip_log, allow_auto=auto_stub_unknowns):
         continue
-    elim_set, cnt, elim_even, elim_odd = eval_filter_on_pool_with_errors(r, pool, base_env, skip_log)
+    elim_set, cnt, elim_even, elim_odd = eval_filter_on_pool_with_errors(r, pool, base_env, skip_log, allow_auto=auto_stub_unknowns)
     names_map[fid] = nm; E_map[fid] = {pool.index(c) for c in elim_set}
     parity_wiper = ((elim_even == total_even and total_even > 0) or (elim_odd == total_odd and total_odd > 0))
     text_blob = f"{r.get('applicable_if','')} || {r.get('expression','')}"
     seed_specific = is_seed_specific(text_blob)
-    s_pct, sims, bad = safety_on_history_with_errors(r["expression"], winners_list, sd_now, fid, nm, skip_log, hot_digits, cold_digits, due_digits)
+    s_pct, sims, bad = safety_on_history_with_errors(r["expression"], winners_list, sd_now, fid, nm, skip_log, hot_digits, cold_digits, due_digits, allow_auto=auto_stub_unknowns)
     rows.append({
         "id": r["id"], "name": nm, "expression": r["expression"],
         "elim_count_on_pool": cnt, "elim_pct_on_pool": (cnt / len(pool) * 100.0) if pool else 0.0,
@@ -948,7 +1062,7 @@ if scored_df.empty:
     st.warning("No filters evaluated (empty)."); st.stop()
 
 # ==============================
-# Skip report
+# Skips + summaries
 # ==============================
 if skip_log:
     st.subheader("⚠️ Skipped / Errored filters")
@@ -956,6 +1070,23 @@ if skip_log:
     agg = (skip_df.groupby(["filter_id","name","stage"])["error"]
            .count().reset_index().rename(columns={"error":"count"})
            .sort_values(["count","filter_id"], ascending=[False, True]))
+    total_skips = len(skip_df)
+    by_stage = (skip_df.groupby("stage").size().reset_index(name="count")
+                .sort_values("count", ascending=False))
+    top_missing = (skip_df[skip_df["missing"].notna() & (skip_df["missing"] != "")]
+                   .groupby("missing").size().reset_index(name="count")
+                   .sort_values("count", ascending=False).head(15))
+
+    cA, cB = st.columns([1,1])
+    with cA:
+        st.metric("Total skipped/evaluation errors", value=total_skips)
+    with cB:
+        st.dataframe(by_stage, use_container_width=True, height=min(220, 60 + 28*len(by_stage)))
+
+    if not top_missing.empty:
+        st.caption("Top undefined names (first 15):")
+        st.dataframe(top_missing, use_container_width=True, height=min(220, 60 + 28*len(top_missing)))
+
     st.dataframe(agg, use_container_width=True, height=min(340, 60 + 28*len(agg)))
     st.download_button("Download full skip log (CSV)", skip_df.to_csv(index=False), "filter_skip_log.csv", "text/csv")
 else:
@@ -966,7 +1097,6 @@ else:
 # ==============================
 arch_df = load_archetype_dimension_lifts(Path(arch_path)) if use_archetype_lifts else None
 
-# Seed profile for archetype traits (optional)
 if seed and seed.isdigit() and len(seed) == 5:
     prof = seed_profile(seed, prev_seed, prev_prev)
 else:
@@ -1003,10 +1133,7 @@ def rec_score(row):
     return row["elim_count_on_pool"] * (0.25 + 0.75*w)
 
 large_df["recommend_score"] = large_df.apply(rec_score, axis=1)
-large_df = large_df.sort_values(
-    by=["recommend_score", "expected_safety_pct", "elim_count_on_pool"],
-    ascending=[False, False, False]
-)
+large_df = large_df.sort_values(by=["recommend_score","expected_safety_pct","elim_count_on_pool"], ascending=[False,False,False])
 
 st.write(f"**Large filters (≥ {min_elims} eliminated):** {len(large_df)}")
 st.dataframe(
@@ -1026,53 +1153,36 @@ st.dataframe(
 )
 
 # ==============================
-# Greedy planning (fast)
+# Planners
 # ==============================
 st.subheader("Planner (greedy)")
 if large_df.empty:
     st.info("No candidates meet the 'Large' threshold; nothing to plan.")
-    kept_after = pool
-    plan = []
+    kept_after = pool; plan = []
 else:
-    candidates = large_df[["id", "name", "expression"]].copy()
+    candidates = large_df[["id","name","expression"]].copy()
     exp_map_for_greedy = {str(r["id"]): (r.get("expected_safety_pct") or 50.0)/100.0 for _, r in large_df.iterrows()}
-    plan, kept_after = greedy_plan(
-        candidates=candidates,
-        pool=pool,
-        base_env=base_env,
-        beam_width=int(beam_width),
-        max_steps=int(max_steps),
-        mode=mode,
-        exp_map_for_greedy=exp_map_for_greedy
-    )
+    plan, kept_after = greedy_plan(candidates, pool, base_env, int(beam_width), int(max_steps), mode, exp_map_for_greedy)
 
 st.write(f"**Kept combos after greedy plan:** {len(kept_after)} / {len(pool)}")
 if plan:
     plan_df = pd.DataFrame(plan)
-    plan_df["expected_safety_pct"] = plan_df["id"].astype(str).map(
-        lambda fid: round(100.0 * float(exp_safety_map_all.get(str(fid), 0.5)), 2)
-    )
+    plan_df["expected_safety_pct"] = plan_df["id"].astype(str).map(lambda fid: round(100.0 * float(exp_safety_map_all.get(str(fid), 0.5)), 2))
     st.write("**Chosen sequence (in order):**")
     st.dataframe(
         plan_df[["id","name","expression","eliminated_this_step","remaining_after","expected_safety_pct","score"]],
         use_container_width=True
     )
 
-# ==============================
-# Best-case & Winner-preserving planners
-# ==============================
 st.subheader("Best-case plan — Large filters only")
 if large_df.empty:
     st.info("No Large filters available for best-case planning.")
 else:
     E_sub = {str(fid): {i for i in E_map.get(str(fid), set())} for fid in large_df["id"].astype(str)}
-    pool_len = len(pool)
-    names_sub = {str(fid): names_map.get(str(fid), "") for fid in E_sub.keys()}
+    pool_len = len(pool); names_sub = {str(fid): names_map.get(str(fid), "") for fid in E_sub.keys()}
     plan_best = best_case_plan_no_winner(
         large_df=large_df.rename(columns={"id":"id"}),
-        E_map=E_sub,
-        names_map=names_sub,
-        pool_len=pool_len,
+        E_map=E_sub, names_map=names_sub, pool_len=pool_len,
         target_max=int(target_max_bc),
         exp_safety_map={fid: float(exp_safety_map_all.get(fid, 0.5)) for fid in E_sub.keys()}
     )
@@ -1088,7 +1198,7 @@ else:
 
 st.subheader("Winner-preserving plan — Large filters only")
 if not known_winner:
-    st.info("Provide a 5-digit **Known winner** in the sidebar to compute a winner-preserving plan.")
+    st.info("Provide a 5-digit Known winner in the sidebar to compute a winner-preserving plan.")
 else:
     if len(known_winner) != 5 or not known_winner.isdigit():
         st.warning("Known winner must be exactly 5 digits.")
@@ -1104,21 +1214,15 @@ else:
             names_sub = {str(fid): names_map.get(str(fid), "") for fid in E_sub.keys()}
             plan_wp = winner_preserving_plan(
                 large_df=large_df.rename(columns={"id":"id"}),
-                E_map=E_sub,
-                names_map=names_sub,
-                pool_len=len(pool),
+                E_map=E_sub, names_map=names_sub, pool_len=len(pool),
                 winner_idx=winner_idx,
-                target_max=int(target_max_wp),
-                beam_width=int(beam_wp),
-                max_steps=int(steps_wp)
+                target_max=int(target_max_wp), beam_width=int(beam_wp), max_steps=int(steps_wp)
             )
             if plan_wp is None:
                 st.info("No winner-preserving reduction possible with the available Large filters.")
             else:
                 wp_df = pd.DataFrame(plan_wp["steps"])
-                wp_df["expected_safety_pct"] = wp_df["filter_id"].astype(str).map(
-                    lambda fid: round(100.0 * float(exp_safety_map_all.get(str(fid), 0.5)), 2)
-                )
+                wp_df["expected_safety_pct"] = wp_df["filter_id"].astype(str).map(lambda fid: round(100.0 * float(exp_safety_map_all.get(str(fid), 0.5)), 2))
                 st.dataframe(
                     wp_df[["filter_id","name","eliminated_now","remaining_after","expected_safety_pct"]],
                     use_container_width=True, hide_index=True, height=min(320, 60 + 28*len(wp_df))
@@ -1148,11 +1252,11 @@ with st.expander("Column guide", expanded=False):
 - **elim_count_on_pool** – Eliminations on your provided pool (aggression metric).
 - **elim_even / elim_odd** – Split of eliminations; helps spot parity-wipers.
 - **parity_wiper** – True if a filter wipes all evens or all odds in your pool (optionally excluded).
-- **seed_specific_trigger** – Filter references seed/prev-seed signals (seed_digits, seed_vtracs, prev_pattern, etc.).
-- **historic_safety_pct** – On similar seeds in history, % of days the filter **kept** the true winner (higher = safer).
-- **expected_safety_pct** – Safety adjusted for current seed archetype (or 50% baseline if no history).
-- **recommend_score** – “Safe but effective” score = eliminations × expected safety.
-- **Best-case plan** – Greedy order of Large filters to reach ≤ target using expected safety.
-- **Winner-preserving plan** – Beam-search order of Large filters that keeps a known winner (for backtests).
+- **seed_specific_trigger** – Filter references seed/prev-seed signals.
+- **historic_safety_pct** – On similar seeds in history, % of days the filter kept the true winner.
+- **expected_safety_pct** – Safety adjusted for current seed archetype (or 50% baseline).
+- **recommend_score** – Eliminations × expected safety.
+- **Best-case plan** – Greedy order to reach ≤ target using expected safety.
+- **Winner-preserving plan** – Order of Large filters that keeps a known winner.
         """
     )
