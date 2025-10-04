@@ -14,7 +14,7 @@ from collections import Counter
 # Config / Page
 # ==============================
 st.set_page_config(page_title="Large Filters Planner — Archetype Merge", layout="wide")
-st.title("Large Filters Planner — Archetype Merge")
+st.title("Large Filters Planner — Archetype Merge (Patched Loader)")
 
 # ==============================
 # Core helpers & signals
@@ -191,7 +191,6 @@ def build_day_env(winners_list: List[str], i: int) -> Dict:
     pdigs = digits_of(prev_seed) if prev_seed else []
     ppdigs = digits_of(prev_prev) if prev_prev else []
 
-    # pattern signature for seed similarity
     prev_pattern = []
     for digs in (ppdigs, pdigs, sd):
         if digs:
@@ -238,11 +237,12 @@ def build_day_env(winners_list: List[str], i: int) -> Dict:
     return env
 
 # ==============================
-# CSV loaders (pool, winners, filters)
+# CSV loaders (pool, winners, filters) — PATCHED
 # ==============================
 @st.cache_data(show_spinner=False)
 def load_winners_csv_from_path(path_or_buf) -> List[str]:
-    df = pd.read_csv(path_or_buf)
+    # tolerant parser
+    df = pd.read_csv(path_or_buf, engine="python")
     cols_lower = {c.lower(): c for c in df.columns}
     if "result" in cols_lower:   s = df[cols_lower["result"]]
     elif "combo" in cols_lower:  s = df[cols_lower["combo"]]
@@ -256,7 +256,7 @@ def load_pool_from_text_or_csv(text: str, col_hint: str) -> List[str]:
     looks_csv = ("," in text and "\n" in text) or text.lower().startswith("result")
     if looks_csv:
         try:
-            df = pd.read_csv(io.StringIO(text))
+            df = pd.read_csv(io.StringIO(text), engine="python")
             cols_lower = {c.lower(): c for c in df.columns}
             if col_hint and col_hint in df.columns: s = df[col_hint]
             elif "result" in cols_lower:            s = df[cols_lower["result"]]
@@ -268,7 +268,7 @@ def load_pool_from_text_or_csv(text: str, col_hint: str) -> List[str]:
     return parse_list_any(text)
 
 def load_pool_from_file(f, col_hint: str) -> List[str]:
-    df = pd.read_csv(f)
+    df = pd.read_csv(f, engine="python")
     cols_lower = {c.lower(): c for c in df.columns}
     if col_hint and col_hint in df.columns: s = df[col_hint]
     elif "result" in cols_lower:            s = df[cols_lower["result"]]
@@ -277,21 +277,44 @@ def load_pool_from_file(f, col_hint: str) -> List[str]:
     return [str(x).strip() for x in s.dropna().astype(str)]
 
 def normalize_filters_df(df: pd.DataFrame) -> pd.DataFrame:
+    # --- tolerant CSV normalization (PATCH) ---
+    df.columns = [str(c).strip() for c in df.columns]
     out = df.copy()
+
+    # ID / FID
     if "id" not in out.columns and "fid" in out.columns:
         out["id"] = out["fid"]
     if "id" not in out.columns:
         out["id"] = range(1, len(out) + 1)
+
+    # must have expression
     if "expression" not in out.columns:
         raise ValueError("Filters CSV must include an 'expression' column.")
+
+    # clean quotes / smart quotes / triple quotes around expression
+    def _clean_expr(x):
+        s = str(x)
+        s = s.replace("“", '"').replace("”", '"').replace("’", "'")
+        if s.startswith('"""') and s.endswith('"""'): s = s[3:-3]
+        if s.startswith('"')   and s.endswith('"'):   s = s[1:-1]
+        return s.strip()
+    out["expression"] = out["expression"].apply(_clean_expr)
+
+    # ensure name
     if "name" not in out.columns:
         out["name"] = out["id"].astype(str)
-    if "parity_wiper" not in out.columns:
-        out["parity_wiper"] = False
-    if "enabled" not in out.columns:
-        out["enabled"] = True
-    if "applicable_if" not in out.columns:
+
+    # tolerant enabled
+    if "enabled" in out.columns:
+        enabled_norm = out["enabled"].apply(lambda v: str(v).strip().lower() in ("1","true","t","yes","y"))
+        out = out[enabled_norm].copy()
+
+    # applicable_if default
+    if "applicable_if" not in out.columns or out["applicable_if"].isna().all():
         out["applicable_if"] = "True"
+
+    # drop blank expressions
+    out = out[out["expression"].astype(str).str.len() > 0].copy()
     return out
 
 def load_filters_from_source(
@@ -299,13 +322,14 @@ def load_filters_from_source(
     uploaded_csv_file,
     csv_path: str,
 ) -> pd.DataFrame:
+    # use python engine for “illegal quoting”
     if pasted_csv_text and pasted_csv_text.strip():
-        df = pd.read_csv(io.StringIO(pasted_csv_text))
+        df = pd.read_csv(io.StringIO(pasted_csv_text), engine="python")
         return normalize_filters_df(df)
     if uploaded_csv_file is not None:
-        df = pd.read_csv(uploaded_csv_file)
+        df = pd.read_csv(uploaded_csv_file, engine="python")
         return normalize_filters_df(df)
-    df = pd.read_csv(csv_path)
+    df = pd.read_csv(csv_path, engine="python")
     return normalize_filters_df(df)
 
 # ==============================
@@ -392,7 +416,7 @@ def load_archetype_dimension_lifts(csv_path: Path) -> Optional[pd.DataFrame]:
     if not csv_path.exists():
         return None
     try:
-        df = pd.read_csv(csv_path)
+        df = pd.read_csv(csv_path, engine="python")
         fid = _first_col(df, ["filter_id","fid","id"])
         dim = _first_col(df, ["dimension","dim","feature","trait_name"])
         val = _first_col(df, ["value","trait","bucket","bin"])
@@ -684,7 +708,7 @@ if not winners_list:
 sd_now = digits_of(seed)
 
 # ==============================
-# Filters: IDs + CSV (pasted / upload / path)
+# Filters: IDs + CSV (pasted / upload / path) — PATCHED
 # ==============================
 st.subheader("Filters")
 fids_text = st.text_area("Paste applicable Filter IDs (optional; comma / space / newline separated):", height=90)
@@ -697,19 +721,25 @@ try:
 except Exception as e:
     st.error(f"Failed to load Filters CSV ➜ {e}"); st.stop()
 
+# Accept IDs OR names in the selector
 applicable_ids = set(parse_list_any(fids_text))
 if applicable_ids:
-    id_str = filters_df_full["id"].astype(str)
-    filters_df = filters_df_full[id_str.isin(applicable_ids)].copy()
-    if filters_df.empty:
-        st.error("None of the pasted Filter IDs matched rows in the selected Filters CSV."); st.stop()
+    id_str   = filters_df_full["id"].astype(str)
+    name_str = filters_df_full.get("name","").astype(str)
+    mask = id_str.isin(applicable_ids) | name_str.isin(applicable_ids)
+    filters_df = filters_df_full[mask].copy()
 else:
     filters_df = filters_df_full.copy()
 
+# tolerant enabled already applied in normalize; keep legacy check too
 if "enabled" in filters_df.columns:
-    filters_df = filters_df[filters_df["enabled"] == True].copy()
+    enabled_norm = filters_df["enabled"].apply(lambda v: str(v).strip().lower() in ("1","true","t","yes","y"))
+    filters_df = filters_df[enabled_norm].copy()
 
-st.write(f"**Filters loaded:** {len(filters_df)}")
+st.write(f"**Filters loaded (pre-eval): {len(filters_df)}**")
+if len(filters_df) == 0:
+    st.warning("0 filters available. Check the CSV path/content, 'enabled' values, expression quoting, or your ID selection.")
+    st.stop()
 
 # ==============================
 # RUN
@@ -773,7 +803,7 @@ if exclude_parity and "parity_wiper" in large_df.columns:
 arch_df = load_archetype_dimension_lifts(Path(arch_path)) if use_archetype_lifts else None
 exp_safety_map = compute_expected_safety_map(large_df.rename(columns={"id":"id"}), arch_df, prof)
 
-# Score for “safe but effective”: eliminations × expected safety (with small lift to safety)
+# Score for “safe but effective”: eliminations × expected safety
 def rec_score(row):
     fid = str(row["id"])
     w = float(exp_safety_map.get(fid, (row["historic_safety_pct"] or 50.0)/100.0))
@@ -793,8 +823,7 @@ st.dataframe(
 
 # Short “Recommended (safe & effective)” list
 st.subheader("Recommended • Safe but Effective")
-rec_df = large_df.copy()
-rec_df = rec_df.sort_values(by=["recommend_score"], ascending=False)
+rec_df = large_df.copy().sort_values(by=["recommend_score"], ascending=False)
 st.dataframe(
     rec_df[["id","name","elim_count_on_pool","historic_safety_pct","recommend_score"]],
     use_container_width=True, height=min(360, 60 + 28*len(rec_df))
@@ -832,13 +861,12 @@ if large_df.empty:
 else:
     E_sub = {str(fid): E_map[str(fid)] for fid in large_df["id"].astype(str) if str(fid) in E_map}
     pool_len = len(pool)
-    # expected safety map keyed by string id
     exp_w = {str(fid): float(exp_safety_map.get(str(fid), 0.5)) for fid in large_df["id"].astype(str)}
     names_sub = {str(fid): names_map.get(str(fid), "") for fid in E_sub.keys()}
     plan_best = best_case_plan_no_winner(
         large_df=large_df.rename(columns={"id":"id"}),
         E_map=E_sub,
-        names_map=numbers_or(names_sub := names_sub),
+        names_map=names_sub,
         pool_len=pool_len,
         target_max=int(target_max_bc),
         exp_safety_map=exp_w
@@ -913,10 +941,9 @@ with st.expander("Column guide", expanded=False):
 - **parity_wiper** – True if a filter wipes all evens or all odds in your pool (optionally excluded).
 - **seed_specific_trigger** – Filter references seed/prev-seed signals (seed_digits, seed_vtracs, prev_pattern, etc.).
 - **historic_safety_pct** – On similar seeds in history, % of days the filter **kept** the true winner (higher = safer).
-- **recommend_score** – Our “safe but effective” score = eliminations × expected safety.
+- **recommend_score** – “Safe but effective” score = eliminations × expected safety.
 - **Best-case plan** – Greedy order of Large filters to reach ≤ target using expected safety (optionally archetype-weighted).
 - **Winner-preserving plan** – Beam-search order of Large filters that keeps a known winner (for backtests).
 """)
 
-# small helper to satisfy mypy (no-op)
 def numbers_or(x): return x
