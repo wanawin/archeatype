@@ -1,6 +1,7 @@
-# large_filters_planner_FULL.py
-# Streamlit app: Filters planner with UI-linked Hot/Cold/Due, complete env aliases,
-# mirror helpers, safe builtins, neutral placeholders for applicable_if, and skip reporter.
+# large_filters_planner_FULL_v2.py
+# Streamlit app: UI-linked Hot/Cold/Due, complete env aliases, mirror helpers,
+# safe builtins, neutral placeholders for applicable_if, skip reporter,
+# and extra forgiving helpers to cut down runtime/type skips.
 
 from __future__ import annotations
 
@@ -18,15 +19,14 @@ from collections import Counter
 # ==============================
 # Page
 # ==============================
-st.set_page_config(page_title="Large Filters Planner — FULL", layout="wide")
-st.title("Large Filters Planner — FULL (UI H/C/D + full env aliases + skip reporter)")
+st.set_page_config(page_title="Large Filters Planner — FULL v2", layout="wide")
+st.title("Large Filters Planner — FULL v2 (UI H/C/D + full env + forgiving helpers)")
 
 # ==============================
 # Core maps & helpers
 # ==============================
 VTRAC: Dict[int, int]  = {0:1,5:1, 1:2,6:2, 2:3,7:3, 3:4,8:4, 4:5,9:5}
-# alias name some CSVs use
-V_TRAC_GROUPS: Dict[int, int] = VTRAC
+V_TRAC_GROUPS: Dict[int, int] = VTRAC  # alias used in some CSVs
 
 MIRROR: Dict[int, int] = {0:5,5:0,1:6,6:1,2:7,7:2,3:8,8:3,4:9,9:4}
 mirror = MIRROR  # some CSVs reference lowercase
@@ -61,7 +61,7 @@ def classify_structure(digs: List[int]) -> str:
     if counts == [2,1,1,1]: return "double"
     return "single"
 
-# alias for CSVs that call it structure_of
+# alias some CSVs use
 structure_of = classify_structure
 
 def spread_band(spread: int) -> str:
@@ -129,6 +129,74 @@ def hot_cold_due(winners_digits: List[List[int]], k: int = 10) -> Tuple[Set[int]
     due = set(range(10)) - last2
     return hot, cold, due
 
+# ---- Forgiving helpers to reduce runtime/type skips ----
+def safe_digits(x):
+    """Return list[int] of all digits in x; empty list if none."""
+    try:
+        return [int(ch) for ch in str(x) if ch.isdigit()]
+    except Exception:
+        return []
+
+def digit_sum(x):
+    """Sum of digits in x; 0 if not applicable."""
+    ds = safe_digits(x)
+    return sum(ds) if ds else 0
+
+def parity_even(n):
+    """True if integer n or digit-sum of string n is even."""
+    try:
+        if isinstance(n, int):
+            return (n % 2) == 0
+        return (digit_sum(n) % 2) == 0
+    except Exception:
+        return False
+
+def vtrac_of(d):
+    """VTRAC group of a single digit; returns None if invalid."""
+    try:
+        d = int(d)
+        return VTRAC[d] if d in VTRAC else None
+    except Exception:
+        return None
+
+def vtrac_count(digs):
+    """Number of distinct VTRAC groups across some digits-like input."""
+    try:
+        return len({VTRAC[int(d)] for d in safe_digits(digs)})
+    except Exception:
+        return 0
+
+def pair_count(digs):
+    """How many digit values appear at least twice."""
+    c = Counter(safe_digits(digs))
+    return sum(1 for _, v in c.items() if v >= 2)
+
+def has_pair(digs):
+    return pair_count(digs) > 0
+
+def safe_div(a, b):
+    """Division that returns 0 on ZeroDivisionError or invalid inputs."""
+    try:
+        return float(a) / float(b)
+    except Exception:
+        return 0.0
+
+# is_hot/is_cold/is_due depend on env hot_set/cold_set/due_set (injected per env)
+def _mk_is_hot(env):
+    return lambda d: (int(d) in env.get("hot_set", set())) if str(d).isdigit() else False
+
+def _mk_is_cold(env):
+    return lambda d: (int(d) in env.get("cold_set", set())) if str(d).isdigit() else False
+
+def _mk_is_due(env):
+    return lambda d: (int(d) in env.get("due_set", set())) if str(d).isdigit() else False
+
+def digits_intersection(a, b):
+    return sorted(set(safe_digits(a)) & set(safe_digits(b)))
+
+def digits_union(a, b):
+    return sorted(set(safe_digits(a)) | set(safe_digits(b)))
+
 # ==============================
 # Environments complete
 # ==============================
@@ -153,7 +221,7 @@ def make_base_env(seed: str, prev_seed: str, prev_prev_seed: str,
     env = {
         # seed & history context
         "seed_digits": sd, "prev_seed_digits": sd2, "prev_prev_seed_digits": sd3,
-        "seed_digits_1": sd2, "seed_digits_2": sd3, "seed_digits_3": [],  # alias names some CSVs use
+        "seed_digits_1": sd2, "seed_digits_2": sd3, "seed_digits_3": [],
         "new_seed_digits": list(set(sd) - set(sd2)),
         "seed_counts": Counter(sd), "seed_sum": sum(sd) if sd else 0,
         "prev_sum_cat": sum_category(sum(sd)) if sd else "",
@@ -173,6 +241,9 @@ def make_base_env(seed: str, prev_seed: str, prev_prev_seed: str,
         "cold": sorted(set(cold_digits)),
         "due":  sorted(set(due_digits)),
 
+        # Sets for fast membership & is_hot/is_cold/is_due
+        "hot_set": set(hot_digits), "cold_set": set(cold_digits), "due_set": set(due_digits),
+
         # Mirror helpers and precomputed mirror sets
         "mirror_of": (lambda d: MIRROR.get(int(d), int(d)) if str(d).isdigit() else d),
         "seed_mirror_digits": sorted({MIRROR[d] for d in sd}) if sd else [],
@@ -187,11 +258,11 @@ def make_base_env(seed: str, prev_seed: str, prev_prev_seed: str,
         "combo_set": set(),
         "combo_sum": 0,
         "combo_sum_cat": sum_category(0),
+        "combo_sum_is_even": False,
         "combo_vtracs": set(),
         "combo_mirror_digits": [],
         "combo_structure": "single",
         "combo_last_digit": None,
-        "combo_sum_is_even": False,
         "spread": 0,
         "seed_spread": (max(sd) - min(sd)) if sd else 0,
         "has_mirror_pair": False,
@@ -201,11 +272,22 @@ def make_base_env(seed: str, prev_seed: str, prev_prev_seed: str,
 
         # helpers
         "sum_category": sum_category, "structure_of": structure_of,
+        "safe_digits": safe_digits, "digit_sum": digit_sum, "parity_even": parity_even,
+        "vtrac_of": vtrac_of, "vtrac_count": vtrac_count,
+        "pair_count": pair_count, "has_pair": has_pair,
+        "safe_div": safe_div,
+        # is_* are injected after env creation because they close over env sets
+        # digits set ops
+        "digits_intersection": digits_intersection, "digits_union": digits_union,
 
         "seed_value": int(seed) if (seed and seed.isdigit()) else None,
-        "nan": float("nan"),
+        "nan": float('nan'),
         "winner_structure": classify_structure(sd) if sd else "",
     }
+    # Late-bind dependent helpers
+    env["is_hot"]  = _mk_is_hot(env)
+    env["is_cold"] = _mk_is_cold(env)
+    env["is_due"]  = _mk_is_due(env)
     return env
 
 def combo_env(base_env: Dict, combo: str) -> Dict:
@@ -241,7 +323,16 @@ def combo_env(base_env: Dict, combo: str) -> Dict:
         "mirror_pairs": mirror_pairs,
         "mirror_pair_count": mirror_pair_count,
         "mirror_overlap_with_seed": mirror_overlap_with_seed,
+
+        # keep H/C/D sets in per-combo env for is_* helpers
+        "hot_set": set(env.get("hot_digits", [])),
+        "cold_set": set(env.get("cold_digits", [])),
+        "due_set": set(env.get("due_digits", [])),
     })
+    # refresh closures
+    env["is_hot"]  = _mk_is_hot(env)
+    env["is_cold"] = _mk_is_cold(env)
+    env["is_due"]  = _mk_is_due(env)
     return env
 
 def build_day_env(winners_list: List[str], i: int,
@@ -293,6 +384,9 @@ def build_day_env(winners_list: List[str], i: int,
         'hot_digits': sorted(set(hot_digits)), 'cold_digits': sorted(set(cold_digits)), 'due_digits': sorted(set(due_digits)),
         'hot': sorted(set(hot_digits)), 'cold': sorted(set(cold_digits)), 'due': sorted(set(due_digits)),
 
+        # sets for is_* helpers
+        'hot_set': set(hot_digits), 'cold_set': set(cold_digits), 'due_set': set(due_digits),
+
         'mirror_of': (lambda d: MIRROR.get(int(d), int(d)) if str(d).isdigit() else d),
         'combo_mirror_digits': combo_mirror_digits, 'seed_mirror_digits': seed_mirror_digits,
         'has_mirror_pair': has_mirror_pair, 'mirror_pairs': mirror_pairs,
@@ -304,10 +398,18 @@ def build_day_env(winners_list: List[str], i: int,
 
         # builtins + helpers
         **SAFE_BUILTINS, 'sum_category': sum_category, 'structure_of': structure_of,
+        'safe_digits': safe_digits, 'digit_sum': digit_sum, 'parity_even': parity_even,
+        'vtrac_of': vtrac_of, 'vtrac_count': vtrac_count, 'pair_count': pair_count,
+        'has_pair': has_pair, 'safe_div': safe_div,
+        'digits_intersection': digits_intersection, 'digits_union': digits_union,
 
         'seed_value': int(seed) if seed.isdigit() else None, 'nan': float('nan'),
         'winner_structure': classify_structure(sd),
     }
+    # Late-bind is_* closures
+    env['is_hot']  = _mk_is_hot(env)
+    env['is_cold'] = _mk_is_cold(env)
+    env['is_due']  = _mk_is_due(env)
     return env
 
 # ==============================
@@ -655,7 +757,7 @@ def winner_preserving_plan(large_df, E_map, names_map, pool_len, winner_idx, tar
         cands.sort(key=lambda x: (x[2], x[1]), reverse=True)
         for fid, elim_now, _sc in cands[:beam_width]:
             newP = P - E_map[fid]
-            step = {"filter_id": fid, "name": names_map.get(fid, ""), "eliminated_now": elim_now, "remaining_after": len(newP)}
+            step = {"filter_id": fid, "name": names_map.get(str(fid), ""), "eliminated_now": elim_now, "remaining_after": len(newP)}
             dfs(newP, used | {fid}, log + [step], depth+1)
 
     dfs(P0, set(), [], 0)
@@ -982,7 +1084,7 @@ else:
         kept_idx = sorted(list(plan_best["final_pool_idx"]))
         kept_combos_bc = [pool[i] for i in kept_idx]
         st.caption(f"Best-case final kept pool size: {len(kept_combos_bc)}")
-        st.dataframe(pd.DataFrame({"Result": kept_combos_bc}).head(100), use_container_width=True, hide_index=True, height=260)
+        st.dataframe(pd.DataFrame({"Result": kept_combos_bc}).head(100), use_container_width=True, height=260)
 
 st.subheader("Winner-preserving plan — Large filters only")
 if not known_winner:
@@ -1024,7 +1126,7 @@ else:
                 kept_idx = sorted(list(plan_wp["final_pool_idx"]))
                 kept_combos_wp = [pool[i] for i in kept_idx]
                 st.caption(f"Winner-preserving final kept pool size: {len(kept_combos_wp)}")
-                st.dataframe(pd.DataFrame({"Result": kept_combos_wp}).head(100), use_container_width=True, hide_index=True, height=260)
+                st.dataframe(pd.DataFrame({"Result": kept_combos_wp}).head(100), use_container_width=True, height=260)
 
 # ==============================
 # Downloads
