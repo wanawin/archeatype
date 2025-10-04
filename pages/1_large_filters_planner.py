@@ -1,12 +1,13 @@
 # large_filters_planner_FULL.py
-# Streamlit app: Filters planner with UI-linked Hot/Cold/Due, mirror helpers,
-# builtins whitelist, neutral placeholders for applicable_if, and skip reporter.
+# Streamlit app: Filters planner with UI-linked Hot/Cold/Due, complete env aliases,
+# mirror helpers, safe builtins, neutral placeholders for applicable_if, and skip reporter.
 
 from __future__ import annotations
 
 import io
 import math
 import re
+import random
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -18,20 +19,26 @@ from collections import Counter
 # Page
 # ==============================
 st.set_page_config(page_title="Large Filters Planner — FULL", layout="wide")
-st.title("Large Filters Planner — FULL (H/C/D linked + mirrors + builtins + skip reporter)")
+st.title("Large Filters Planner — FULL (UI H/C/D + full env aliases + skip reporter)")
 
 # ==============================
 # Core maps & helpers
 # ==============================
 VTRAC: Dict[int, int]  = {0:1,5:1, 1:2,6:2, 2:3,7:3, 3:4,8:4, 4:5,9:5}
+# alias name some CSVs use
+V_TRAC_GROUPS: Dict[int, int] = VTRAC
+
 MIRROR: Dict[int, int] = {0:5,5:0,1:6,6:1,2:7,7:2,3:8,8:3,4:9,9:4}
+mirror = MIRROR  # some CSVs reference lowercase
 
 SAFE_BUILTINS = {
+    # builtins
     "abs": abs, "int": int, "str": str, "float": float, "round": round,
     "len": len, "sum": sum, "max": max, "min": min, "any": any, "all": all,
     "set": set, "sorted": sorted, "list": list, "tuple": tuple, "dict": dict,
     "range": range, "enumerate": enumerate, "map": map, "filter": filter,
-    "Counter": Counter,
+    # safe modules/types
+    "math": math, "re": re, "random": random, "Counter": Counter,
 }
 
 def digits_of(s: str) -> List[int]:
@@ -53,6 +60,9 @@ def classify_structure(digs: List[int]) -> str:
     if counts == [2,2,1]:   return "double_double"
     if counts == [2,1,1,1]: return "double"
     return "single"
+
+# alias for CSVs that call it structure_of
+structure_of = classify_structure
 
 def spread_band(spread: int) -> str:
     if spread <= 3: return "0–3"
@@ -120,25 +130,39 @@ def hot_cold_due(winners_digits: List[List[int]], k: int = 10) -> Tuple[Set[int]
     return hot, cold, due
 
 # ==============================
-# Environments
+# Environments complete
 # ==============================
+def _make_prev_pattern(pp: List[int], p: List[int], s: List[int]) -> tuple:
+    def _pair(digs):
+        if not digs: return ("","")
+        tot = sum(digs)
+        return (sum_category(tot), "Even" if tot % 2 == 0 else "Odd")
+    return (*_pair(pp), *_pair(p), *_pair(s))
+
 def make_base_env(seed: str, prev_seed: str, prev_prev_seed: str,
                   hot_digits: List[int], cold_digits: List[int], due_digits: List[int]) -> Dict:
-    """Base env for applicable_if and as the parent of combo envs.
-       IMPORTANT: hot/cold/due here are exactly what you typed in the UI."""
+    """Base env for applicable_if and as the parent of combo envs."""
     sd  = digits_of(seed) if seed else []
     sd2 = digits_of(prev_seed) if prev_seed else []
     sd3 = digits_of(prev_prev_seed) if prev_prev_seed else []
 
+    # convenience
+    last2 = set(sd) | set(sd2)
+    common_to_both = set(sd) & set(sd2)
+
     env = {
+        # seed & history context
         "seed_digits": sd, "prev_seed_digits": sd2, "prev_prev_seed_digits": sd3,
+        "seed_digits_1": sd2, "seed_digits_2": sd3, "seed_digits_3": [],  # alias names some CSVs use
         "new_seed_digits": list(set(sd) - set(sd2)),
-        "seed_counts": Counter(sd),
-        "seed_sum": sum(sd) if sd else 0,
+        "seed_counts": Counter(sd), "seed_sum": sum(sd) if sd else 0,
         "prev_sum_cat": sum_category(sum(sd)) if sd else "",
         "seed_vtracs": set(VTRAC[d] for d in sd) if sd else set(),
+        "prev_pattern": _make_prev_pattern(sd3, sd2, sd),
+        "common_to_both": common_to_both, "last2": last2,
 
-        "VTRAC": VTRAC,
+        # core maps
+        "VTRAC": VTRAC, "V_TRAC_GROUPS": V_TRAC_GROUPS,
         "mirror": MIRROR, "MIRROR": MIRROR,
 
         # Temperature lists and aliases — DIRECT from UI
@@ -166,9 +190,17 @@ def make_base_env(seed: str, prev_seed: str, prev_prev_seed: str,
         "combo_vtracs": set(),
         "combo_mirror_digits": [],
         "combo_structure": "single",
+        "combo_last_digit": None,
+        "combo_sum_is_even": False,
+        "spread": 0,
+        "seed_spread": (max(sd) - min(sd)) if sd else 0,
         "has_mirror_pair": False,
         "mirror_pair_count": 0,
+        "mirror_pairs": set(),
         "mirror_overlap_with_seed": 0,
+
+        # helpers
+        "sum_category": sum_category, "structure_of": structure_of,
 
         "seed_value": int(seed) if (seed and seed.isdigit()) else None,
         "nan": float("nan"),
@@ -180,28 +212,33 @@ def combo_env(base_env: Dict, combo: str) -> Dict:
     """Per-combo env inherits base env and augments with combo_* details."""
     cd = digits_of(combo)
     env = dict(base_env)
-    combo_set = set(cd)
+    cset = set(cd)
 
     combo_mirror_digits = sorted({base_env["mirror"][d] for d in cd}) if cd else []
-    mirror_pairs = {tuple(sorted((d, base_env["mirror"][d]))) for d in cd
-                    if base_env["mirror"][d] in combo_set and base_env["mirror"][d] != d}
+    mirror_pairs = {tuple(sorted((d, base_env["mirror"][d]))) for d in cset
+                    if base_env["mirror"][d] in cset and base_env["mirror"][d] != d}
     mirror_pair_count = len(mirror_pairs)
     has_mirror_pair = mirror_pair_count > 0
-    mirror_overlap_with_seed = len(combo_set & set(base_env.get("seed_mirror_digits", [])))
+    mirror_overlap_with_seed = len(cset & set(base_env.get("seed_mirror_digits", [])))
 
     env.update({
-        "combo": combo, "combo_digits": sorted(cd), "combo_digits_list": sorted(cd),
-        "combo_set": combo_set,
+        "combo": combo,
+        "combo_digits": sorted(cd),
+        "combo_digits_list": sorted(cd),
+        "combo_set": cset,
         "combo_sum": sum(cd),
         "combo_sum_cat": sum_category(sum(cd)),
+        "combo_sum_is_even": (sum(cd) % 2 == 0),
         "combo_vtracs": set(VTRAC[d] for d in cd),
         "combo_structure": classify_structure(cd),
-        "last_digit": cd[-1] if cd else None,
+        "combo_last_digit": cd[-1] if cd else None,
+
         "spread": (max(cd) - min(cd)) if cd else 0,
         "seed_spread": (max(base_env["seed_digits"]) - min(base_env["seed_digits"])) if base_env["seed_digits"] else 0,
 
         "combo_mirror_digits": combo_mirror_digits,
         "has_mirror_pair": has_mirror_pair,
+        "mirror_pairs": mirror_pairs,
         "mirror_pair_count": mirror_pair_count,
         "mirror_overlap_with_seed": mirror_overlap_with_seed,
     })
@@ -213,56 +250,63 @@ def build_day_env(winners_list: List[str], i: int,
     seed = winners_list[i-1]
     winner = winners_list[i]
     sd = digits_of(seed)
-    cd = sorted(digits_of(winner))
+    cd = digits_of(winner)
 
     prev_seed = winners_list[i-2] if i-2 >= 0 else ""
     prev_prev = winners_list[i-3] if i-3 >= 0 else ""
     pdigs = digits_of(prev_seed) if prev_seed else []
     ppdigs = digits_of(prev_prev) if prev_prev else []
 
-    prev_pattern = []
-    for digs in (ppdigs, pdigs, sd):
-        if digs:
-            parity = 'Even' if sum(digs) % 2 == 0 else 'Odd'
-            prev_pattern.extend([sum_category(sum(digs)), parity])
-        else:
-            prev_pattern.extend(['', ''])
+    prev_pattern = _make_prev_pattern(ppdigs, pdigs, sd)
 
-    combo_set = set(cd)
+    cset = set(cd)
     combo_mirror_digits = sorted({MIRROR[d] for d in cd}) if cd else []
     seed_mirror_digits = sorted({MIRROR[d] for d in sd}) if sd else []
-    mirror_pairs = {tuple(sorted((d, MIRROR[d]))) for d in cd if MIRROR[d] in combo_set and MIRROR[d] != d}
+    mirror_pairs = {tuple(sorted((d, MIRROR[d]))) for d in cset if MIRROR[d] in cset and MIRROR[d] != d}
     mirror_pair_count = len(mirror_pairs)
     has_mirror_pair = mirror_pair_count > 0
-    mirror_overlap_with_seed = len(combo_set & set(seed_mirror_digits))
+    mirror_overlap_with_seed = len(cset & set(seed_mirror_digits))
+
+    last2 = set(sd) | set(pdigs)
+    common_to_both = set(sd) & set(pdigs)
 
     env = {
+        # seed & prevs
         'seed_digits': sd, 'prev_seed_digits': pdigs, 'prev_prev_seed_digits': ppdigs,
+        'seed_digits_1': pdigs, 'seed_digits_2': ppdigs, 'seed_digits_3': [],
         'new_seed_digits': list(set(sd) - set(pdigs)), 'seed_counts': Counter(sd),
         'seed_sum': sum(sd), 'prev_sum_cat': sum_category(sum(sd)), 'prev_pattern': tuple(prev_pattern),
+        'seed_vtracs': set(VTRAC[d] for d in sd),
 
-        'combo': winner, 'combo_digits': cd, 'combo_digits_list': cd,
-        'combo_set': combo_set,
-        'combo_sum': sum(cd), 'combo_sum_cat': sum_category(sum(cd)),
+        # winner as "combo" for the day
+        'combo': winner, 'combo_digits': sorted(cd), 'combo_digits_list': sorted(cd),
+        'combo_set': cset, 'combo_sum': sum(cd), 'combo_sum_cat': sum_category(sum(cd)),
+        'combo_sum_is_even': (sum(cd) % 2 == 0),
+        'combo_vtracs': set(VTRAC[d] for d in cd),
+        'combo_structure': classify_structure(cd),
+        'combo_last_digit': cd[-1] if cd else None,
 
-        'seed_vtracs': set(VTRAC[d] for d in sd), 'combo_vtracs': set(VTRAC[d] for d in cd),
-        'mirror': MIRROR, 'MIRROR': MIRROR, 'VTRAC': VTRAC,
+        # mirrors/vtrac maps
+        'mirror': MIRROR, 'MIRROR': MIRROR, 'VTRAC': VTRAC, 'V_TRAC_GROUPS': V_TRAC_GROUPS,
 
-        # CRITICAL: use UI lists here too
+        # use UI H/C/D here too
         'hot_digits': sorted(set(hot_digits)), 'cold_digits': sorted(set(cold_digits)), 'due_digits': sorted(set(due_digits)),
         'hot': sorted(set(hot_digits)), 'cold': sorted(set(cold_digits)), 'due': sorted(set(due_digits)),
 
         'mirror_of': (lambda d: MIRROR.get(int(d), int(d)) if str(d).isdigit() else d),
         'combo_mirror_digits': combo_mirror_digits, 'seed_mirror_digits': seed_mirror_digits,
-        'has_mirror_pair': has_mirror_pair,
-        'mirror_pair_count': mirror_pair_count,
-        'mirror_overlap_with_seed': mirror_overlap_with_seed,
+        'has_mirror_pair': has_mirror_pair, 'mirror_pairs': mirror_pairs,
+        'mirror_pair_count': mirror_pair_count, 'mirror_overlap_with_seed': mirror_overlap_with_seed,
+
+        # convenience
+        'common_to_both': common_to_both, 'last2': last2,
+        'spread': (max(cd) - min(cd)) if cd else 0, 'seed_spread': (max(sd) - min(sd)) if sd else 0,
 
         # builtins + helpers
-        **SAFE_BUILTINS,
+        **SAFE_BUILTINS, 'sum_category': sum_category, 'structure_of': structure_of,
 
         'seed_value': int(seed) if seed.isdigit() else None, 'nan': float('nan'),
-        'winner_structure': classify_structure(sd), 'combo_structure': classify_structure(cd),
+        'winner_structure': classify_structure(sd),
     }
     return env
 
@@ -388,8 +432,8 @@ def eval_filter_on_pool_with_errors(row: pd.Series, pool: List[str], base_env: D
         try:
             if bool(eval(code, {"__builtins__": {}}, {**SAFE_BUILTINS, **env})):
                 eliminated.add(c)
-                if (env["combo_sum"] % 2) == 0: elim_even += 1
-                else:                             elim_odd  += 1
+                if env["combo_sum_is_even"]: elim_even += 1
+                else:                        elim_odd  += 1
         except Exception as e:
             skip_log.append({"filter_id": fid, "name": name, "stage": "expr_eval", "combo": c, "error": str(e), "missing": _missing_name_from_exc(e)})
     return eliminated, len(eliminated), elim_even, elim_odd
@@ -810,7 +854,7 @@ if skip_log:
     agg = (skip_df.groupby(["filter_id","name","stage"])["error"]
            .count().reset_index().rename(columns={"error":"count"})
            .sort_values(["count","filter_id"], ascending=[False, True]))
-    st.dataframe(agg, use_container_width=True, height=min(320, 60 + 28*len(agg)))
+    st.dataframe(agg, use_container_width=True, height=min(340, 60 + 28*len(agg)))
     st.download_button("Download full skip log (CSV)", skip_df.to_csv(index=False), "filter_skip_log.csv", "text/csv")
 else:
     st.info("No evaluation errors detected while compiling/evaluating filters.")
