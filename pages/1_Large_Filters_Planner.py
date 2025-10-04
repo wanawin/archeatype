@@ -11,10 +11,10 @@ import streamlit as st
 from collections import Counter
 
 # ==============================
-# Config / Page
+# Page
 # ==============================
 st.set_page_config(page_title="Large Filters Planner — Archetype Merge", layout="wide")
-st.title("Large Filters Planner — Archetype Merge (Patched Loader)")
+st.title("Large Filters Planner — Archetype Merge (All-Safety + Tolerant CSV)")
 
 # ==============================
 # Core helpers & signals
@@ -108,17 +108,14 @@ def hot_cold_due(winners_digits: List[List[int]], k: int = 10) -> Tuple[Set[int]
     cnt = Counter(flat)
     if not cnt:
         return set(), set(), set(range(10))
-    # hot = top 6 by frequency (ties included)
     most = cnt.most_common()
     topk = 6
     thresh = most[topk-1][1] if len(most) >= topk else most[-1][1]
     hot = {d for d, c in most if c >= thresh}
-    # cold = bottom 4 by frequency (ties included)
     least = sorted(cnt.items(), key=lambda x: (x[1], x[0]))
     coldk = 4
     cth = least[coldk-1][1] if len(least) >= coldk else least[0][1]
     cold = {d for d, c in least if c <= cth}
-    # due = not seen in last 2
     last2 = set(d for row in winners_digits[-2:] for d in row)
     due = set(range(10)) - last2
     return hot, cold, due
@@ -237,11 +234,10 @@ def build_day_env(winners_list: List[str], i: int) -> Dict:
     return env
 
 # ==============================
-# CSV loaders (pool, winners, filters) — PATCHED
+# CSV loaders (pool, winners, filters) — TOLERANT
 # ==============================
 @st.cache_data(show_spinner=False)
 def load_winners_csv_from_path(path_or_buf) -> List[str]:
-    # tolerant parser
     df = pd.read_csv(path_or_buf, engine="python")
     cols_lower = {c.lower(): c for c in df.columns}
     if "result" in cols_lower:   s = df[cols_lower["result"]]
@@ -277,21 +273,17 @@ def load_pool_from_file(f, col_hint: str) -> List[str]:
     return [str(x).strip() for x in s.dropna().astype(str)]
 
 def normalize_filters_df(df: pd.DataFrame) -> pd.DataFrame:
-    # --- tolerant CSV normalization (PATCH) ---
     df.columns = [str(c).strip() for c in df.columns]
     out = df.copy()
 
-    # ID / FID
     if "id" not in out.columns and "fid" in out.columns:
         out["id"] = out["fid"]
     if "id" not in out.columns:
         out["id"] = range(1, len(out) + 1)
 
-    # must have expression
     if "expression" not in out.columns:
         raise ValueError("Filters CSV must include an 'expression' column.")
 
-    # clean quotes / smart quotes / triple quotes around expression
     def _clean_expr(x):
         s = str(x)
         s = s.replace("“", '"').replace("”", '"').replace("’", "'")
@@ -300,29 +292,20 @@ def normalize_filters_df(df: pd.DataFrame) -> pd.DataFrame:
         return s.strip()
     out["expression"] = out["expression"].apply(_clean_expr)
 
-    # ensure name
     if "name" not in out.columns:
         out["name"] = out["id"].astype(str)
 
-    # tolerant enabled
     if "enabled" in out.columns:
         enabled_norm = out["enabled"].apply(lambda v: str(v).strip().lower() in ("1","true","t","yes","y"))
         out = out[enabled_norm].copy()
 
-    # applicable_if default
     if "applicable_if" not in out.columns or out["applicable_if"].isna().all():
         out["applicable_if"] = "True"
 
-    # drop blank expressions
     out = out[out["expression"].astype(str).str.len() > 0].copy()
     return out
 
-def load_filters_from_source(
-    pasted_csv_text: str,
-    uploaded_csv_file,
-    csv_path: str,
-) -> pd.DataFrame:
-    # use python engine for “illegal quoting”
+def load_filters_from_source(pasted_csv_text: str, uploaded_csv_file, csv_path: str) -> pd.DataFrame:
     if pasted_csv_text and pasted_csv_text.strip():
         df = pd.read_csv(io.StringIO(pasted_csv_text), engine="python")
         return normalize_filters_df(df)
@@ -343,10 +326,6 @@ def eval_applicable(applicable_if: str, base_env: Dict) -> bool:
         return True
 
 def eval_filter_on_pool(row: pd.Series, pool: List[str], base_env: Dict) -> Tuple[Set[str], int, int, int]:
-    """
-    Return (eliminated_set, elim_count, elim_even, elim_odd).
-    Expression returns True to eliminate combo.
-    """
     expr = str(row["expression"])
     try:
         code = compile(expr, "<filter_expr>", "eval")
@@ -451,7 +430,7 @@ def current_traits_for_match(prof: Dict[str, object]) -> Dict[str, List[str]]:
     return {
         "sum_cat": [str(prof["sum_cat"])],
         "sum_category": [str(prof["sum_cat"])],
-        "parity": [str(prof["parity"])],  # e.g., "3E/2O"
+        "parity": [str(prof["parity"])],
         "parity_major": ["even>=3" if prof["parity"] and prof["parity"][0].isdigit() and int(prof["parity"][0])>=3 else "even<=2"],
         "structure": [str(prof["structure"])],
         "spread_band": [str(prof["spread_band"])],
@@ -461,12 +440,12 @@ def current_traits_for_match(prof: Dict[str, object]) -> Dict[str, List[str]]:
     }
 
 def compute_expected_safety_map(
-    large_df: pd.DataFrame,
+    df_for_map: pd.DataFrame,
     arch_df: Optional[pd.DataFrame],
     prof: Dict[str, object]
 ) -> Dict[str, float]:
     base_map = {}
-    for _, r in large_df.iterrows():
+    for _, r in df_for_map.iterrows():
         fid = str(r["id"])
         kept = r.get("historic_safety_pct")
         base_map[fid] = float(kept)/100.0 if pd.notna(kept) else 0.5
@@ -602,12 +581,11 @@ def winner_preserving_plan(large_df, E_map, names_map, pool_len, winner_idx, tar
     return None
 
 # ==============================
-# Sidebar (merged knobs)
+# Sidebar
 # ==============================
 with st.sidebar:
     st.header("Mode & Thresholds")
-    mode = st.radio("Mode", ["Playlist Reducer", "Safe Filter Explorer"], index=1,
-                    help="Playlist Reducer = larger eliminations.\nSafe Filter Explorer = lower threshold, deeper search.")
+    mode = st.radio("Mode", ["Playlist Reducer", "Safe Filter Explorer"], index=1)
     if mode == "Playlist Reducer":
         default_min_elims = 120; default_beam = 5; default_steps = 15
     else:
@@ -645,7 +623,6 @@ hot_digits  = [int(x) for x in parse_list_any(d1.text_input("Hot digits (comma-s
 cold_digits = [int(x) for x in parse_list_any(d2.text_input("Cold digits (comma-separated)")) if x.isdigit()]
 due_digits  = [int(x) for x in parse_list_any(d3.text_input("Due digits (comma-separated)")) if x.isdigit()]
 
-# Seed Archetype panel (top)
 if seed and seed.isdigit() and len(seed) == 5:
     prof = seed_profile(seed, prev_seed, prev_prev)
     st.markdown("### Seed Profile • Archetype")
@@ -708,7 +685,7 @@ if not winners_list:
 sd_now = digits_of(seed)
 
 # ==============================
-# Filters: IDs + CSV (pasted / upload / path) — PATCHED
+# Filters: IDs + CSV (pasted / upload / path)
 # ==============================
 st.subheader("Filters")
 fids_text = st.text_area("Paste applicable Filter IDs (optional; comma / space / newline separated):", height=90)
@@ -721,7 +698,6 @@ try:
 except Exception as e:
     st.error(f"Failed to load Filters CSV ➜ {e}"); st.stop()
 
-# Accept IDs OR names in the selector
 applicable_ids = set(parse_list_any(fids_text))
 if applicable_ids:
     id_str   = filters_df_full["id"].astype(str)
@@ -731,7 +707,6 @@ if applicable_ids:
 else:
     filters_df = filters_df_full.copy()
 
-# tolerant enabled already applied in normalize; keep legacy check too
 if "enabled" in filters_df.columns:
     enabled_norm = filters_df["enabled"].apply(lambda v: str(v).strip().lower() in ("1","true","t","yes","y"))
     filters_df = filters_df[enabled_norm].copy()
@@ -792,6 +767,28 @@ scored_df = pd.DataFrame(rows)
 if scored_df.empty:
     st.warning("No filters evaluated (empty)."); st.stop()
 
+# --- Compute Expected Safety for ALL evaluated filters (not just 'large') ---
+arch_df = load_archetype_dimension_lifts(Path(arch_path)) if use_archetype_lifts else None
+
+def _expected_map_for(df):
+    if df.empty:
+        return {}
+    return compute_expected_safety_map(df.rename(columns={"id": "id"}), arch_df, prof)
+
+exp_safety_map_all = _expected_map_for(scored_df)
+
+def attach_expected_safety(df):
+    if df.empty:
+        return df
+    out = df.copy()
+    out["expected_safety_pct"] = (
+        out["id"].astype(str)
+        .map(lambda fid: round(100.0 * float(exp_safety_map_all.get(str(fid), 0.5)), 2))
+    )
+    return out
+
+scored_df = attach_expected_safety(scored_df)
+
 # ==============================
 # Candidate “Large” + Recommendations
 # ==============================
@@ -799,33 +796,33 @@ large_df = scored_df[scored_df["elim_count_on_pool"] >= int(min_elims)].copy()
 if exclude_parity and "parity_wiper" in large_df.columns:
     large_df = large_df[~large_df["parity_wiper"]].copy()
 
-# Archetype-weighted expected safety
-arch_df = load_archetype_dimension_lifts(Path(arch_path)) if use_archetype_lifts else None
-exp_safety_map = compute_expected_safety_map(large_df.rename(columns={"id":"id"}), arch_df, prof)
+if "expected_safety_pct" not in large_df.columns:
+    large_df = attach_expected_safety(large_df)
 
-# Score for “safe but effective”: eliminations × expected safety
 def rec_score(row):
-    fid = str(row["id"])
-    w = float(exp_safety_map.get(fid, (row["historic_safety_pct"] or 50.0)/100.0))
+    w = (row["expected_safety_pct"] or 50.0) / 100.0
     return row["elim_count_on_pool"] * (0.25 + 0.75*w)
 
 large_df["recommend_score"] = large_df.apply(rec_score, axis=1)
 large_df = large_df.sort_values(
-    by=["recommend_score", "historic_safety_pct", "elim_count_on_pool"],
+    by=["recommend_score", "expected_safety_pct", "elim_count_on_pool"],
     ascending=[False, False, False]
 )
 
 st.write(f"**Large filters (≥ {min_elims} eliminated):** {len(large_df)}")
 st.dataframe(
-    large_df[["id","name","elim_count_on_pool","elim_pct_on_pool","historic_safety_pct","similar_days","bad_hits","parity_wiper","recommend_score"]],
+    large_df[[
+        "id","name","elim_count_on_pool","elim_pct_on_pool",
+        "historic_safety_pct","expected_safety_pct",
+        "similar_days","bad_hits","parity_wiper","recommend_score"
+    ]],
     use_container_width=True
 )
 
-# Short “Recommended (safe & effective)” list
 st.subheader("Recommended • Safe but Effective")
 rec_df = large_df.copy().sort_values(by=["recommend_score"], ascending=False)
 st.dataframe(
-    rec_df[["id","name","elim_count_on_pool","historic_safety_pct","recommend_score"]],
+    rec_df[["id","name","elim_count_on_pool","historic_safety_pct","expected_safety_pct","recommend_score"]],
     use_container_width=True, height=min(360, 60 + 28*len(rec_df))
 )
 
@@ -849,8 +846,16 @@ else:
 
 st.write(f"**Kept combos after greedy plan:** {len(kept_after)} / {len(pool)}")
 if plan:
+    # Enrich chosen steps with Expected Safety
+    plan_df = pd.DataFrame(plan)
+    plan_df["expected_safety_pct"] = plan_df["id"].astype(str).map(
+        lambda fid: round(100.0 * float(exp_safety_map_all.get(str(fid), 0.5)), 2)
+    )
     st.write("**Chosen sequence (in order):**")
-    st.dataframe(pd.DataFrame(plan), use_container_width=True)
+    st.dataframe(
+        plan_df[["id","name","expression","eliminated_this_step","remaining_after","expected_safety_pct"]],
+        use_container_width=True
+    )
 
 # ==============================
 # Best-case & Winner-preserving planners
@@ -859,9 +864,8 @@ st.subheader("Best-case plan — Large filters only")
 if large_df.empty:
     st.info("No Large filters available for best-case planning.")
 else:
-    E_sub = {str(fid): E_map[str(fid)] for fid in large_df["id"].astype(str) if str(fid) in E_map}
+    E_sub = {str(fid): {i for i in E_map.get(str(fid), set())} for fid in large_df["id"].astype(str)}
     pool_len = len(pool)
-    exp_w = {str(fid): float(exp_safety_map.get(str(fid), 0.5)) for fid in large_df["id"].astype(str)}
     names_sub = {str(fid): names_map.get(str(fid), "") for fid in E_sub.keys()}
     plan_best = best_case_plan_no_winner(
         large_df=large_df.rename(columns={"id":"id"}),
@@ -869,7 +873,7 @@ else:
         names_map=names_sub,
         pool_len=pool_len,
         target_max=int(target_max_bc),
-        exp_safety_map=exp_w
+        exp_safety_map={fid: float(exp_safety_map_all.get(fid, 0.5)) for fid in E_sub.keys()}
     )
     if plan_best is None:
         st.info("Best-case plan could not reach the target with available Large filters.")
@@ -895,7 +899,7 @@ else:
         if winner_idx is None or large_df.empty:
             st.info("Winner not found in pool, or no Large filters.")
         else:
-            E_sub = {str(fid): E_map[str(fid)] for fid in large_df["id"].astype(str) if str(fid) in E_map}
+            E_sub = {str(fid): {i for i in E_map.get(str(fid), set())} for fid in large_df["id"].astype(str)}
             names_sub = {str(fid): names_map.get(str(fid), "") for fid in E_sub.keys()}
             plan_wp = winner_preserving_plan(
                 large_df=large_df.rename(columns={"id":"id"}),
@@ -911,7 +915,13 @@ else:
                 st.info("No winner-preserving reduction possible with the available Large filters.")
             else:
                 wp_df = pd.DataFrame(plan_wp["steps"])
-                st.dataframe(wp_df, use_container_width=True, hide_index=True, height=min(320, 60 + 28*len(wp_df)))
+                wp_df["expected_safety_pct"] = wp_df["filter_id"].astype(str).map(
+                    lambda fid: round(100.0 * float(exp_safety_map_all.get(str(fid), 0.5)), 2)
+                )
+                st.dataframe(
+                    wp_df[["filter_id","name","eliminated_now","remaining_after","expected_safety_pct"]],
+                    use_container_width=True, hide_index=True, height=min(320, 60 + 28*len(wp_df))
+                )
                 kept_idx = sorted(list(plan_wp["final_pool_idx"]))
                 kept_combos_wp = [pool[i] for i in kept_idx]
                 st.caption(f"Winner-preserving final kept pool size: {len(kept_combos_wp)}")
@@ -941,8 +951,9 @@ with st.expander("Column guide", expanded=False):
 - **parity_wiper** – True if a filter wipes all evens or all odds in your pool (optionally excluded).
 - **seed_specific_trigger** – Filter references seed/prev-seed signals (seed_digits, seed_vtracs, prev_pattern, etc.).
 - **historic_safety_pct** – On similar seeds in history, % of days the filter **kept** the true winner (higher = safer).
+- **expected_safety_pct** – Safety adjusted for current seed archetype (or 50% baseline if no history).
 - **recommend_score** – “Safe but effective” score = eliminations × expected safety.
-- **Best-case plan** – Greedy order of Large filters to reach ≤ target using expected safety (optionally archetype-weighted).
+- **Best-case plan** – Greedy order of Large filters to reach ≤ target using expected safety.
 - **Winner-preserving plan** – Beam-search order of Large filters that keeps a known winner (for backtests).
 """)
 
