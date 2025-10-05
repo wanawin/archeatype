@@ -1,21 +1,9 @@
 # 1_Large_Filters_Planner.py
 # Large Filters Planner — Archetyper (full app)
-# - Sidebar preserved (Mode, Greedy beam/steps, Exclude parity-wipers, Archetype lifts)
-# - Tester-style evaluator: aliases, H/C/D bound to UI, mirror, VTRAC (v4)
-# - Digital root helpers + seed/combo values and root sums
-# - Compile-once + skip-on-error; skipped/failed table + undefined-token frequency
-# - Winner-preserving plan + Playlist Reducer
-# - Kept/Removed downloads
-# - Results cached in st.session_state["last_run"] so downloads don't reset UI
-
+# Adds: mirror() callable, seed_vtracs, prev_*_vtracs, seed_digits_1..3 aliases, NaN support.
 from __future__ import annotations
 
-import io
-import math
-import os
-import random
-import re
-import unicodedata
+import io, math, os, random, re, unicodedata
 from collections import Counter, defaultdict
 from typing import Dict, List, Set, Tuple
 
@@ -41,20 +29,16 @@ SAFE_BUILTINS = {
     "range": range, "enumerate": enumerate, "map": map, "filter": filter,
     "math": math, "re": re, "random": random, "Counter": Counter,
     "True": True, "False": False, "None": None,
+    # NEW: NaN literal support (many CSV rows contain NaN)
+    "nan": float("nan"),
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Small helpers exposed to expressions
 # ──────────────────────────────────────────────────────────────────────────────
 def parse_list_any(text: str) -> List[str]:
-    if not text:
-        return []
-    raw = (
-        text.replace("\t", ",")
-        .replace("\n", ",")
-        .replace(";", ",")
-        .replace(" ", ",")
-    )
+    if not text: return []
+    raw = text.replace("\t", ",").replace("\n", ",").replace(";", ",").replace(" ", ",")
     return [p.strip() for p in raw.split(",") if p.strip()]
 
 def digits_of(s: str) -> List[int]:
@@ -62,26 +46,22 @@ def digits_of(s: str) -> List[int]:
     return [int(ch) for ch in s if ch.isdigit()]
 
 def safe_digits(x):
-    try:
-        return [int(ch) for ch in str(x) if ch.isdigit()]
-    except Exception:
-        return []
+    try: return [int(ch) for ch in str(x) if ch.isdigit()]
+    except Exception: return []
 
 def digit_sum(x): return sum(safe_digits(x))
-
 def digit_span(x):
-    ds = safe_digits(x)
+    ds = safe_digits(x); 
     return (max(ds) - min(ds)) if ds else 0
 
 def classify_structure(digs: List[int]) -> str:
-    c = Counter(digs)
-    counts = sorted(c.values(), reverse=True)
+    c = Counter(digs); counts = sorted(c.values(), reverse=True)
     if counts == [5]: return "quint"
-    if counts == [4, 1]: return "quad"
-    if counts == [3, 2]: return "triple_double"
-    if counts == [3, 1, 1]: return "triple"
-    if counts == [2, 2, 1]: return "double_double"
-    if counts == [2, 1, 1, 1]: return "double"
+    if counts == [4,1]: return "quad"
+    if counts == [3,2]: return "triple_double"
+    if counts == [3,1,1]: return "triple"
+    if counts == [2,2,1]: return "double_double"
+    if counts == [2,1,1,1]: return "double"
     return "single"
 
 def even_count(x): return sum(1 for d in safe_digits(x) if d % 2 == 0)
@@ -95,16 +75,33 @@ def last_two_digits(x): ds = safe_digits(x); return ds[-2:] if len(ds) >= 2 else
 def has_triplet(x): c = Counter(safe_digits(x)); return (max(c.values()) if c else 0) >= 3
 
 def vtrac_of(d):
-    try:
-        d = int(d)
-        return VTRAC.get(d)
-    except Exception:
-        return None
+    try: d = int(d); return VTRAC.get(d)
+    except Exception: return None
 
 def contains_mirror_pair(x):
     s = set(safe_digits(x))
     return any((d in s and MIRROR.get(d) in s and MIRROR[d] != d) for d in s)
 
+# NEW: a callable mirror() — many filters use mirror(n) syntax
+def mirror_of(x):
+    try:
+        x = int(x)
+    except Exception:
+        # try to mirror each digit in a string like "123"
+        ds = [int(ch) for ch in str(x) if ch.isdigit()]
+        if not ds: return x
+        md = [MIRROR.get(d, d) for d in ds]
+        try: return int("".join(str(d) for d in md))
+        except Exception: return "".join(str(d) for d in md)
+    # integer path
+    if 0 <= x <= 9:
+        return MIRROR.get(x, x)
+    ds = [int(ch) for ch in str(x)]
+    md = [MIRROR.get(d, d) for d in ds]
+    try: return int("".join(str(d) for d in md))
+    except Exception: return "".join(str(d) for d in md)
+
+# H/C/D lambdas bound to current sets
 def _mk_is_hot(env):  return lambda d: (str(d).isdigit() and int(d) in env.get("hot_set", set()))
 def _mk_is_cold(env): return lambda d: (str(d).isdigit() and int(d) in env.get("cold_set", set()))
 def _mk_is_due(env):  return lambda d: (str(d).isdigit() and int(d) in env.get("due_set", set()))
@@ -123,42 +120,31 @@ def count_in_due(x, due_set=None):
 
 # NEW: digital-root helpers + scalar values
 def digital_root(n: int) -> int:
-    try:
-        n = int(n)
-    except Exception:
-        n = 0
-    if n == 0:
-        return 0
+    try: n = int(n)
+    except Exception: n = 0
+    if n == 0: return 0
     m = n % 9
     return 9 if m == 0 else m
 
 def as_int_from_digits(digs) -> int:
-    if not digs:
-        return 0
-    try:
-        return int("".join(str(d) for d in digs))
-    except Exception:
-        return 0
+    if not digs: return 0
+    try: return int("".join(str(d) for d in digs))
+    except Exception: return 0
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Expression normalization (aliases + cleanup)
 # ──────────────────────────────────────────────────────────────────────────────
 _CAMEL_RE = re.compile(r"(?<!^)(?=[A-Z])")
 def _camel_to_snake(s: str) -> str: return _CAMEL_RE.sub("_", s).lower()
-
 def _ascii(s: str) -> str:
     if s is None: return ""
     s = unicodedata.normalize("NFKD", str(s))
-    return (
-        s.replace("“", '"').replace("”", '"')
-         .replace("’", "'").replace("‘", "'")
-         .replace("–", "-").replace("—", "-")
-    )
+    return (s.replace("“", '"').replace("”", '"')
+             .replace("’","'").replace("‘","'")
+             .replace("–","-").replace("—","-"))
 
 def _wb_replace(text: str, mapping: Dict[str, str]) -> str:
-    """Word-boundary replacement using regex (FIXED: pass input string)."""
-    if not mapping:
-        return text
+    if not mapping: return text
     items = sorted(mapping.items(), key=lambda kv: len(kv[0]), reverse=True)
     for k, v in items:
         pattern = rf"\b{re.escape(k)}\b"
@@ -180,11 +166,21 @@ _VARIATION_MAP: Dict[str, str] = {
     "mirrorDigits":"combo_mirror_digits","mirrordigits":"combo_mirror_digits","mirrors":"combo_mirror_digits",
     "mirrorSet":"set(combo_mirror_digits)","mirrorset":"set(combo_mirror_digits)",
     "mirrorPairs":"contains_mirror_pair(combo_digits)","hasMirrorPair":"contains_mirror_pair(combo_digits)",
+    # NOTE: allow function-style calls: mirror(x) is already handled by providing mirror callable in env
+    "mirrorOf":"mirror","mirror_of":"mirror",
     # combo/seed
     "comboDigits":"combo_digits","combodigits":"combo_digits",
     "comboSet":"set(combo_digits)","comboset":"set(combo_digits)",
     "seedDigits":"seed_digits","seeddigits":"seed_digits",
     "seedSet":"set(seed_digits)","seedset":"set(seed_digits)",
+    # seed digit aliases used by some CSVs
+    "seed_digits_1":"prev_seed_digits",
+    "seed_digits_2":"prev_prev_seed_digits",
+    "seed_digits_3":"prev_prev_prev_seed_digits",
+    # vtrac (v4)
+    "vtrack":"VTRAC","vtracks":"VTRAC","vtracGroups":"VTRAC",
+    "vtracSet":"combo_vtracs","vtracLast":"combo_last_vtrac","lastVtrac":"combo_last_vtrac",
+    "seedVtracs":"seed_vtracs","seed_vtracs":"seed_vtracs",
     # parity/counts
     "parityEven":"combo_sum_is_even","isEven":"combo_sum_is_even","isOdd":"not combo_sum_is_even",
     "evenCount":"even_count(combo_digits)","oddCount":"odd_count(combo_digits)",
@@ -196,15 +192,14 @@ _VARIATION_MAP: Dict[str, str] = {
     "sumDigits":"digit_sum(combo_digits)","digitSum":"digit_sum(combo_digits)",
     "comboSum":"digit_sum(combo_digits)","sum":"digit_sum(combo_digits)",
     "structure":"combo_structure",
-    # vtrac (v4)
-    "vtrack":"VTRAC","vtracks":"VTRAC","vtracGroups":"VTRAC",
-    "vtracSet":"combo_vtracs","vtracLast":"combo_last_vtrac","lastVtrac":"combo_last_vtrac",
-    # NEW: value & (digital) root-sum language
+    # value & (digital) root-sum language
     "seedValue": "seed_value", "seed_value": "seed_value",
     "comboValue": "combo_value", "combo_value": "combo_value",
     "rootSum": "digital_root", "root_sum": "digital_root",
     "seedRootSum": "seed_root_sum", "seed_root_sum": "seed_root_sum",
     "comboRootSum": "combo_root_sum", "combo_root_sum": "combo_root_sum",
+    # NaN forms
+    "NaN": "nan",
 }
 
 def normalize_expr(expr: str) -> str:
@@ -216,6 +211,7 @@ def normalize_expr(expr: str) -> str:
         "firstDigit","lastDigit","lastTwo","last2","digitSum","sumDigits","vtracSet","vtracLast","vtracGroups",
         "comboSum","comboSet","seedSet","isEven","isOdd","parityEven","structure",
         "seedValue","comboValue","seedRootSum","comboRootSum","rootSum",
+        "seed_digits_1","seed_digits_2","seed_digits_3","seedVtracs","seed_vtracs",
     ]:
         if t in x: x = x.replace(t, _camel_to_snake(t))
     x = _wb_replace(x, _VARIATION_MAP)
@@ -303,7 +299,7 @@ def make_base_env(seed, prev_seed, prev_prev_seed, prev_prev_prev_seed,
         "prev_seed_digits": digits_of(prev_seed) if prev_seed else [],
         "prev_prev_seed_digits": digits_of(prev_prev_seed) if prev_prev_seed else [],
         "prev_prev_prev_seed_digits": digits_of(prev_prev_prev_seed) if prev_prev_prev_seed else [],
-        "VTRAC": VTRAC, "MIRROR": MIRROR, "mirror": MIRROR,
+        "VTRAC": VTRAC, "MIRROR": MIRROR,  # keep dicts
         "hot_digits": sorted(set(hot_digits)),
         "cold_digits": sorted(set(cold_digits)),
         "due_digits":  sorted(set(due_digits)),
@@ -313,8 +309,11 @@ def make_base_env(seed, prev_seed, prev_prev_seed, prev_prev_prev_seed,
         "first_digit": first_digit, "last_digit": last_digit, "last_two_digits": last_two_digits,
         "digit_span": digit_span, "classify_structure": classify_structure, "has_triplet": has_triplet,
         "contains_mirror_pair": contains_mirror_pair, "vtrac_of": vtrac_of,
-        "digital_root": digital_root,  # allow direct calls
+        "digital_root": digital_root,
+        # expose callable mirror()
+        "mirror": mirror_of, "mirror_of": mirror_of,
         **SAFE_BUILTINS,
+        # combo placeholders
         "combo": "", "combo_digits": [], "combo_set": set(),
         "combo_sum": 0, "combo_sum_is_even": False,
         "combo_last_digit": None, "combo_structure": "single",
@@ -333,6 +332,11 @@ def make_base_env(seed, prev_seed, prev_prev_seed, prev_prev_prev_seed,
         "prev_seed_root_sum": digital_root(prev_seed_value),
         "prev_prev_seed_root_sum": digital_root(prev_prev_seed_value),
         "prev_prev_prev_seed_root_sum": digital_root(prev_prev_prev_seed_value),
+        # NEW: vtracs for seed/history (requested by CSV)
+        "seed_vtracs": set(VTRAC[d] for d in env["seed_digits"]) if env["seed_digits"] else set(),
+        "prev_seed_vtracs": set(VTRAC[d] for d in env["prev_seed_digits"]) if env["prev_seed_digits"] else set(),
+        "prev_prev_seed_vtracs": set(VTRAC[d] for d in env["prev_prev_seed_digits"]) if env["prev_prev_seed_digits"] else set(),
+        "prev_prev_prev_seed_vtracs": set(VTRAC[d] for d in env["prev_prev_prev_seed_digits"]) if env["prev_prev_prev_seed_digits"] else set(),
     })
     env["is_hot"]  = _mk_is_hot(env)
     env["is_cold"] = _mk_is_cold(env)
@@ -354,7 +358,6 @@ def combo_env(base_env: Dict, combo: str) -> Dict:
         "combo_mirror_digits": [MIRROR[d] for d in cd] if cd else [],
         "combo_vtracs": set(VTRAC[d] for d in cd) if cd else set(),
         "combo_last_vtrac": (VTRAC[cd[-1]] if cd else None),
-        # NEW:
         "combo_value": combo_value,
         "combo_root_sum": digital_root(combo_value),
     })
@@ -479,7 +482,7 @@ if exclude_parity_wipers and len(filters_df):
 st.caption(f"Filters loaded: {len(filters_df)}")
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Run button — store results in session_state
+# Run button — store results in session_state (downloads won't reset)
 # ──────────────────────────────────────────────────────────────────────────────
 def run_planner_and_cache():
     base_env = make_base_env(
@@ -495,7 +498,7 @@ def run_planner_and_cache():
     token_freq: Dict[str,int] = defaultdict(int)
 
     for _, r in filters_df.iterrows():
-        # capture compile issues
+        # compile issues → skipped entries
         if str(r.get("compile_error_applicable","")).strip():
             fid = str(r.get("id","")); fname = str(r.get("name",""))
             runtime_errors[fid] = {"id": fid, "name": fname, "error_type": "compile",
@@ -595,13 +598,8 @@ def run_planner_and_cache():
                           columns=["symbol","error_count"]) if token_freq else pd.DataFrame()
 
     st.session_state["last_run"] = {
-        "out": out,
-        "large_only": large_only,
-        "winner_plan": winner_plan,
-        "kept_df": kept_df,
-        "rem_df": rem_df,
-        "skipped_df": skipped_df,
-        "tok_df": tok_df,
+        "out": out, "large_only": large_only, "winner_plan": winner_plan,
+        "kept_df": kept_df, "rem_df": rem_df, "skipped_df": skipped_df, "tok_df": tok_df,
     }
 
 run = st.button("▶ Run Planner + Recommender", type="primary", disabled=(len(pool)==0 or len(filters_df)==0))
@@ -613,13 +611,10 @@ if run:
 # ──────────────────────────────────────────────────────────────────────────────
 if "last_run" in st.session_state and st.session_state["last_run"]:
     R = st.session_state["last_run"]
-    out         = R["out"]
-    large_only  = R["large_only"]
-    winner_plan = R["winner_plan"]
-    kept_df     = R["kept_df"]
-    rem_df      = R["rem_df"]
-    skipped_df  = R["skipped_df"]
-    tok_df      = R["tok_df"]
+    out, large_only  = R["out"], R["large_only"]
+    winner_plan      = R["winner_plan"]
+    kept_df, rem_df  = R["kept_df"], R["rem_df"]
+    skipped_df, tok_df = R["skipped_df"], R["tok_df"]
 
     st.subheader("Filter Diagnostics")
     if out is None or out.empty:
