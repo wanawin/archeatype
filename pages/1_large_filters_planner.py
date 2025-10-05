@@ -1,7 +1,10 @@
 # 1_Large_Filters_Planner.py
 # Large Filters Planner — Archetyper
-# Hotfix: expose lowercase 'mirror' in eval env to match CSV usage.
-# (Previous build only exposed 'MIRROR'.)
+# Updates in this build:
+# - Expose seed_sum (= sum(seed_digits)) in the eval environment.
+# - Add aliases: seedSum, sumSeedDigits -> seed_sum.
+# - All prior fixes retained: hybrid mirror, robust eval scoping, H/C/D, vtracs,
+#   phrase normalization ("mirror of X"), skip reporting, token panel always visible.
 
 from __future__ import annotations
 import io, math, os, random, re, unicodedata
@@ -36,14 +39,14 @@ def digits_of(s: str) -> List[int]:
     s = str(s).strip()
     return [int(ch) for ch in s if ch.isdigit()]
 
-def safe_digits(x): 
+def safe_digits(x):
     try: return [int(ch) for ch in str(x) if ch.isdigit()]
     except Exception: return []
 
 def digit_sum(x): return sum(safe_digits(x))
 def digit_span(x):
-    ds = safe_digits(x); 
-    return (max(ds)-min(ds)) if ds else 0
+    ds = safe_digits(x)
+    return (max(ds) - min(ds)) if ds else 0
 
 def classify_structure(digs: List[int]) -> str:
     c = Counter(digs); counts = sorted(c.values(), reverse=True)
@@ -55,23 +58,23 @@ def classify_structure(digs: List[int]) -> str:
     if counts == [2,1,1,1]: return "double"
     return "single"
 
-def even_count(x): return sum(1 for d in safe_digits(x) if d%2==0)
-def odd_count(x):  return sum(1 for d in safe_digits(x) if d%2==1)
-def high_count(x): return sum(1 for d in safe_digits(x) if d>=5)
-def low_count(x):  return sum(1 for d in safe_digits(x) if d<=4)
+def even_count(x): return sum(1 for d in safe_digits(x) if d % 2 == 0)
+def odd_count(x):  return sum(1 for d in safe_digits(x) if d % 2 == 1)
+def high_count(x): return sum(1 for d in safe_digits(x) if d >= 5)
+def low_count(x):  return sum(1 for d in safe_digits(x) if d <= 4)
 
-def first_digit(x): ds=safe_digits(x); return ds[0] if ds else None
-def last_digit(x):  ds=safe_digits(x); return ds[-1] if ds else None
-def last_two_digits(x): ds=safe_digits(x); return ds[-2:] if len(ds)>=2 else ds
-def has_triplet(x): c=Counter(safe_digits(x)); return (max(c.values()) if c else 0)>=3
+def first_digit(x): ds = safe_digits(x); return ds[0] if ds else None
+def last_digit(x):  ds = safe_digits(x); return ds[-1] if ds else None
+def last_two_digits(x): ds = safe_digits(x); return ds[-2:] if len(ds) >= 2 else ds
+def has_triplet(x): c = Counter(safe_digits(x)); return (max(c.values()) if c else 0) >= 3
 
 def vtrac_of(d):
-    try: d=int(d); return VTRAC.get(d)
+    try: d = int(d); return VTRAC.get(d)
     except Exception: return None
 
 def contains_mirror_pair(x):
-    s=set(safe_digits(x))
-    return any((d in s and MIRROR_MAP.get(d) in s and MIRROR_MAP[d]!=d) for d in s)
+    s = set(safe_digits(x))
+    return any((d in s and MIRROR_MAP.get(d) in s and MIRROR_MAP[d] != d) for d in s)
 
 # Hybrid 'mirror' that works both as a callable and a dict (.get / [key])
 class _MirrorHybrid:
@@ -85,15 +88,15 @@ class _MirrorHybrid:
             md = [self._m.get(d, d) for d in ds]
             try: return int("".join(str(d) for d in md))
             except Exception: return "".join(str(d) for d in md)
-        if 0<=x<=9: return self._m.get(x, x)
-        ds=[int(ch) for ch in str(x)]
-        md=[self._m.get(d, d) for d in ds]
+        if 0 <= x <= 9: return self._m.get(x, x)
+        ds = [int(ch) for ch in str(x)]
+        md = [self._m.get(d, d) for d in ds]
         try: return int("".join(str(d) for d in md))
         except Exception: return "".join(str(d) for d in md)
     # dict-like
     def get(self, k, default=None): return self._m.get(int(k), default)
     def __getitem__(self, k): return self._m[int(k)]
-    def __contains__(self, k): 
+    def __contains__(self, k):
         try: return int(k) in self._m
         except Exception: return False
     def items(self): return self._m.items()
@@ -119,11 +122,11 @@ def count_in_due(x, due_set=None):
     return sum(1 for d in safe_digits(x) if d in ds)
 
 def digital_root(n: int) -> int:
-    try: n=int(n)
-    except Exception: n=0
-    if n==0: return 0
-    m=n%9
-    return 9 if m==0 else m
+    try: n = int(n)
+    except Exception: n = 0
+    if n == 0: return 0
+    m = n % 9
+    return 9 if m == 0 else m
 
 def as_int_from_digits(digs) -> int:
     if not digs: return 0
@@ -194,10 +197,12 @@ _VARIATION_MAP: Dict[str,str] = {
     # value & root sum
     "seedValue":"seed_value","comboValue":"combo_value",
     "rootSum":"digital_root","seedRootSum":"seed_root_sum","comboRootSum":"combo_root_sum",
+    # NEW: seed sum aliases
+    "seedSum":"seed_sum","sumSeedDigits":"seed_sum",
     # NaN
     "NaN":"nan",
 }
-# We intentionally DO NOT map bare 'sum' (keep built-in sum()).
+# Intentionally DO NOT map bare 'sum' (keep built-in sum()).
 
 def normalize_expr(expr: str) -> str:
     if not expr: return ""
@@ -210,6 +215,7 @@ def normalize_expr(expr: str) -> str:
         "comboSum","comboSet","seedSet","isEven","isOdd","parityEven","structure",
         "seedValue","comboValue","seedRootSum","comboRootSum","rootSum",
         "seed_digits_1","seed_digits_2","seed_digits_3","seedVtracs","seed_vtracs",
+        "seedSum","sumSeedDigits",
     ]:
         if t in x: x = x.replace(t, _camel_to_snake(t))
     x = _wb_replace(x, _VARIATION_MAP)
@@ -222,7 +228,7 @@ def _clean_expr(s: str) -> str:
 
 # ── CSV loaders ───────────────────────────────────────────────────────────────
 def _pick_col(df: pd.DataFrame, hint: str) -> pd.Series:
-    cols_lower = {c.lower():c for c in df.columns}
+    cols_lower = {c.lower(): c for c in df.columns}
     if hint and hint in df.columns: return df[hint]
     if "result" in cols_lower: return df[cols_lower["result"]]
     if "combo" in cols_lower:  return df[cols_lower["combo"]]
@@ -247,31 +253,31 @@ def load_pool_from_file(f, col_hint: str) -> List[str]:
     return [str(x).strip() for x in s.dropna().astype(str)]
 
 def normalize_filters_df(df: pd.DataFrame) -> pd.DataFrame:
-    out = pd.DataFrame([{k.lower():v for k,v in r.items()} for r in df.to_dict(orient="records")])
-    if "id" not in out.columns and "fid" in out.columns: out["id"]=out["fid"]
-    if "id" not in out.columns: out["id"] = range(1, len(out)+1)
+    out = pd.DataFrame([{k.lower(): v for k, v in row.items()} for row in df.to_dict(orient="records")])
+    if "id" not in out.columns and "fid" in out.columns: out["id"] = out["fid"]
+    if "id" not in out.columns: out["id"] = range(1, len(out) + 1)
     if "expression" not in out.columns: raise ValueError("Filters CSV must include an 'expression' column.")
     out["expression"] = out["expression"].map(_clean_expr)
-    if "name" not in out.columns: out["name"]=out["id"].astype(str)
+    if "name" not in out.columns: out["name"] = out["id"].astype(str)
     if "applicable_if" not in out.columns or out["applicable_if"].isna().all():
-        out["applicable_if"]="True"
+        out["applicable_if"] = "True"
     else:
-        out["applicable_if"]=out["applicable_if"].map(_clean_expr)
-    if "enabled" not in out.columns: out["enabled"]=True
+        out["applicable_if"] = out["applicable_if"].map(_clean_expr)
+    if "enabled" not in out.columns: out["enabled"] = True
 
-    rows=[]
+    rows = []
     for _, r in out.iterrows():
-        rr=dict(r)
+        rr = dict(r)
         try:
-            rr["applicable_code"]=compile(rr.get("applicable_if","True") or "True","<applicable>","eval")
+            rr["applicable_code"] = compile(rr.get("applicable_if", "True") or "True", "<applicable>", "eval")
         except SyntaxError as e:
-            rr["applicable_code"]=compile("True","<applicable>","eval")
-            rr["compile_error_applicable"]=str(e)
+            rr["applicable_code"] = compile("True", "<applicable>", "eval")
+            rr["compile_error_applicable"] = str(e)
         try:
-            rr["expr_code"]=compile(rr.get("expression","False") or "False","<expr>","eval")
+            rr["expr_code"] = compile(rr.get("expression", "False") or "False", "<expr>", "eval")
         except SyntaxError as e:
-            rr["expr_code"]=compile("False","<expr>","eval")
-            rr["compile_error_expr"]=str(e)
+            rr["expr_code"] = compile("False", "<expr>", "eval")
+            rr["compile_error_expr"] = str(e)
         rows.append(rr)
     return pd.DataFrame(rows)
 
@@ -295,38 +301,41 @@ def make_base_env(seed, prev_seed, prev_prev_seed, prev_prev_prev_seed,
         "prev_prev_prev_seed_digits": digits_of(prev_prev_prev_seed) if prev_prev_prev_seed else [],
         "VTRAC": VTRAC,
         "MIRROR": MIRROR,          # UPPERCASE alias
-        "mirror": MIRROR,          # <<< NEW: expose lowercase 'mirror' used by CSV filters
+        "mirror": MIRROR,          # lowercase alias (CSV uses 'mirror')
         "hot_digits": sorted(set(hot_digits)),
         "cold_digits": sorted(set(cold_digits)),
         "due_digits":  sorted(set(due_digits)),
         "hot_set": set(hot_digits), "cold_set": set(cold_digits), "due_set": set(due_digits),
-        "digits_of":digits_of, "safe_digits":safe_digits, "digit_sum":digit_sum, "even_count":even_count,
-        "odd_count":odd_count, "high_count":high_count, "low_count":low_count, "first_digit":first_digit,
-        "last_digit":last_digit, "last_two_digits":last_two_digits, "digit_span":digit_span,
-        "classify_structure":classify_structure, "has_triplet":has_triplet, "contains_mirror_pair":contains_mirror_pair,
-        "vtrac_of":vtrac_of, "digital_root":digital_root,
+        "digits_of": digits_of, "safe_digits": safe_digits, "digit_sum": digit_sum, "even_count": even_count,
+        "odd_count": odd_count, "high_count": high_count, "low_count": low_count, "first_digit": first_digit,
+        "last_digit": last_digit, "last_two_digits": last_two_digits, "digit_span": digit_span,
+        "classify_structure": classify_structure, "has_triplet": has_triplet, "contains_mirror_pair": contains_mirror_pair,
+        "vtrac_of": vtrac_of, "digital_root": digital_root,
         **SAFE_BUILTINS,
         # combo placeholders
-        "combo":"", "combo_digits":[], "combo_set":set(), "combo_sum":0, "combo_sum_is_even":False,
-        "combo_last_digit":None, "combo_structure":"single",
+        "combo": "", "combo_digits": [], "combo_set": set(), "combo_sum": 0, "combo_sum_is_even": False,
+        "combo_last_digit": None, "combo_structure": "single",
     }
     # seed scalars + root sums + vtracs
     seed_value = as_int_from_digits(env["seed_digits"])
     prev_seed_value = as_int_from_digits(env["prev_seed_digits"])
     prev_prev_seed_value = as_int_from_digits(env["prev_prev_seed_digits"])
     prev_prev_prev_seed_value = as_int_from_digits(env["prev_prev_prev_seed_digits"])
+    # NEW: seed_sum value (used by some filters)
+    seed_sum_val = sum(env["seed_digits"])
     env.update({
-        "seed_value":seed_value, "prev_seed_value":prev_seed_value,
-        "prev_prev_seed_value":prev_prev_seed_value, "prev_prev_prev_seed_value":prev_prev_prev_seed_value,
-        "seed_root_sum":digital_root(seed_value), "prev_seed_root_sum":digital_root(prev_seed_value),
-        "prev_prev_seed_root_sum":digital_root(prev_prev_seed_value),
-        "prev_prev_prev_seed_root_sum":digital_root(prev_prev_prev_seed_value),
+        "seed_value": seed_value, "prev_seed_value": prev_seed_value,
+        "prev_prev_seed_value": prev_prev_seed_value, "prev_prev_prev_seed_value": prev_prev_prev_seed_value,
+        "seed_root_sum": digital_root(seed_value), "prev_seed_root_sum": digital_root(prev_seed_value),
+        "prev_prev_seed_root_sum": digital_root(prev_prev_seed_value),
+        "prev_prev_prev_seed_root_sum": digital_root(prev_prev_prev_seed_value),
+        "seed_sum": seed_sum_val,  # <<< exposed
         "seed_vtracs": set(VTRAC[d] for d in env["seed_digits"]) if env["seed_digits"] else set(),
         "prev_seed_vtracs": set(VTRAC[d] for d in env["prev_seed_digits"]) if env["prev_seed_digits"] else set(),
         "prev_prev_seed_vtracs": set(VTRAC[d] for d in env["prev_prev_seed_digits"]) if env["prev_prev_seed_digits"] else set(),
         "prev_prev_prev_seed_vtracs": set(VTRAC[d] for d in env["prev_prev_prev_seed_digits"]) if env["prev_prev_prev_seed_digits"] else set(),
     })
-    env["is_hot"]=_mk_is_hot(env); env["is_cold"]=_mk_is_cold(env); env["is_due"]=_mk_is_due(env)
+    env["is_hot"] = _mk_is_hot(env); env["is_cold"] = _mk_is_cold(env); env["is_due"] = _mk_is_due(env)
     return env
 
 def combo_env(base_env: Dict, combo: str) -> Dict:
@@ -334,21 +343,21 @@ def combo_env(base_env: Dict, combo: str) -> Dict:
     env = dict(base_env)
     combo_value = as_int_from_digits(cd)
     env.update({
-        "combo":combo, "combo_digits":cd, "combo_set":set(cd),
-        "combo_sum":sum(cd), "combo_sum_is_even":(sum(cd)%2==0),
-        "combo_last_digit":(cd[-1] if cd else None), "combo_structure":classify_structure(cd),
-        "combo_mirror_digits":[MIRROR_MAP.get(d,d) for d in cd] if cd else [],
+        "combo": combo, "combo_digits": cd, "combo_set": set(cd),
+        "combo_sum": sum(cd), "combo_sum_is_even": (sum(cd) % 2 == 0),
+        "combo_last_digit": (cd[-1] if cd else None), "combo_structure": classify_structure(cd),
+        "combo_mirror_digits": [MIRROR_MAP.get(d, d) for d in cd] if cd else [],
         "combo_vtracs": set(VTRAC[d] for d in cd) if cd else set(),
         "combo_last_vtrac": (VTRAC[cd[-1]] if cd else None),
         "combo_value": combo_value, "combo_root_sum": digital_root(combo_value),
     })
-    env["is_hot"]=_mk_is_hot(env); env["is_cold"]=_mk_is_cold(env); env["is_due"]=_mk_is_due(env)
+    env["is_hot"] = _mk_is_hot(env); env["is_cold"] = _mk_is_cold(env); env["is_due"] = _mk_is_due(env)
     return env
 
 # ── Evaluators (robust scoping + error collection) ────────────────────────────
 def eval_applicable(row: pd.Series, base_env: Dict) -> bool:
     try:
-        globs={"__builtins__":{}}
+        globs = {"__builtins__": {}}
         globs.update(base_env)
         return bool(eval(row["applicable_code"], globs, base_env))
     except Exception:
@@ -358,12 +367,12 @@ NAME_ERR = re.compile(r"name '([^']+)' is not defined")
 
 def eval_filter_on_pool(row: pd.Series, pool: List[str], base_env: Dict,
                         runtime_errors_accum: Dict[str,dict], token_counts: Dict[str,int]) -> Tuple[Set[str], int]:
-    eliminated=set()
-    code=row["expr_code"]; fid=str(row.get("id","")); fname=str(row.get("name",""))
+    eliminated = set()
+    code = row["expr_code"]; fid = str(row.get("id","")); fname = str(row.get("name",""))
     for c in pool:
-        env=combo_env(base_env, c)
+        env = combo_env(base_env, c)
         try:
-            globs={"__builtins__":{}}
+            globs = {"__builtins__": {}}
             globs.update(env)
             if bool(eval(code, globs, env)):
                 eliminated.add(c)
@@ -371,10 +380,10 @@ def eval_filter_on_pool(row: pd.Series, pool: List[str], base_env: Dict,
             rec = runtime_errors_accum.setdefault(
                 fid, {"id":fid, "name":fname, "error_type":"runtime", "error_count":0, "first_error":""}
             )
-            rec["error_count"]+=1
+            rec["error_count"] += 1
             if not rec["first_error"]:
-                rec["first_error"]=f"{type(e).__name__}: {e}"
-            m=NAME_ERR.search(str(e))
+                rec["first_error"] = f"{type(e).__name__}: {e}"
+            m = NAME_ERR.search(str(e))
             if m: token_counts[m.group(1)] += 1
             continue
     return eliminated, len(eliminated)
@@ -394,70 +403,72 @@ arch_path = st.sidebar.text_input("Archetype-lifts CSV path", value="archetype_f
 
 # ── Center UI (unchanged) ─────────────────────────────────────────────────────
 st.subheader("Hot / Cold / Due digits (optional)")
-cc1,cc2,cc3=st.columns(3)
-hot_digits=[int(x) for x in parse_list_any(cc1.text_input("Hot digits (comma-separated)")) if x.isdigit()]
-cold_digits=[int(x) for x in parse_list_any(cc2.text_input("Cold digits (comma-separated)")) if x.isdigit()]
-due_digits =[int(x) for x in parse_list_any(cc3.text_input("Due digits (comma-separated)")) if x.isdigit()]
-st.session_state["hot_digits"]=hot_digits; st.session_state["cold_digits"]=cold_digits; st.session_state["due_digits"]=due_digits
+cc1, cc2, cc3 = st.columns(3)
+hot_digits = [int(x) for x in parse_list_any(cc1.text_input("Hot digits (comma-separated)")) if x.isdigit()]
+cold_digits = [int(x) for x in parse_list_any(cc2.text_input("Cold digits (comma-separated)")) if x.isdigit()]
+due_digits  = [int(x) for x in parse_list_any(cc3.text_input("Due digits (comma-separated)")) if x.isdigit()]
+st.session_state["hot_digits"] = hot_digits; st.session_state["cold_digits"] = cold_digits; st.session_state["due_digits"] = due_digits
 
 st.subheader("Combo Pool")
-pool_text=st.text_area("Paste combos (CSV w/ 'Result' column OR tokens separated by newline/space/comma):", height=140)
-pool_file=st.file_uploader("Or upload combo pool CSV ('Result' or 'combo' column)", type=["csv"])
-pool_col_hint=st.text_input("Pool column name hint (default 'Result')", value="Result")
-pool=[]
+pool_text = st.text_area("Paste combos (CSV w/ 'Result' column OR tokens separated by newline/space/comma):", height=140)
+pool_file = st.file_uploader("Or upload combo pool CSV ('Result' or 'combo' column)", type=["csv"])
+pool_col_hint = st.text_input("Pool column name hint (default 'Result')", value="Result")
+pool: List[str] = []
 try:
-    if pool_text.strip(): pool=load_pool_from_text_or_csv(pool_text, pool_col_hint)
-    elif pool_file is not None: pool=load_pool_from_file(pool_file, pool_col_hint)
+    if pool_text.strip(): pool = load_pool_from_text_or_csv(pool_text, pool_col_hint)
+    elif pool_file is not None: pool = load_pool_from_file(pool_file, pool_col_hint)
 except Exception as e:
     st.error(f"Pool import failed: {e}")
 st.caption(f"Pool size: {len(pool)}")
 
 st.subheader("Draw History (4 back)")
-s1,s2,s3,s4=st.columns(4)
-seed=s1.text_input("Known winner (0-back)", value="")
-prev_seed=s2.text_input("Draw 1-back", value="")
-prev_prev=s3.text_input("Draw 2-back", value="")
-prev_prev_prev=s4.text_input("Draw 3-back", value="")
+s1, s2, s3, s4 = st.columns(4)
+seed           = s1.text_input("Known winner (0-back)", value="")
+prev_seed      = s2.text_input("Draw 1-back", value="")
+prev_prev      = s3.text_input("Draw 2-back", value="")
+prev_prev_prev = s4.text_input("Draw 3-back", value="")
 
 st.subheader("Filters")
-fids_text=st.text_area("Paste applicable Filter IDs (optional; comma / space / newline separated):", height=90)
-filters_pasted_csv=st.text_area("Paste Filters CSV content (optional):", height=150)
-filters_file_up=st.file_uploader("Or upload Filters CSV (used if pasted CSV is empty)", type=["csv"])
-filters_csv_path=st.text_input("Or path to Filters CSV (used if pasted/upload empty)", value="lottery_filters_batch_10.csv")
+fids_text = st.text_area("Paste applicable Filter IDs (optional; comma / space / newline separated):", height=90)
+filters_pasted_csv = st.text_area("Paste Filters CSV content (optional):", height=150)
+filters_file_up = st.file_uploader("Or upload Filters CSV (used if pasted CSV is empty)", type=["csv"])
+filters_csv_path = st.text_input("Or path to Filters CSV (used if pasted/upload empty)", value="lottery_filters_batch_10.csv")
 
 try:
-    filters_df_full=load_filters_from_source(filters_pasted_csv, filters_file_up, filters_csv_path)
+    filters_df_full = load_filters_from_source(filters_pasted_csv, filters_file_up, filters_csv_path)
 except Exception as e:
     st.error(f"Failed to load Filters CSV ➜ {e}")
-    filters_df_full=pd.DataFrame(columns=["id","name","expression","enabled","applicable_if","compile_error_applicable","compile_error_expr"])
+    filters_df_full = pd.DataFrame(columns=["id","name","expression","enabled","applicable_if","compile_error_applicable","compile_error_expr"])
 
-applicable_ids=set(parse_list_any(fids_text))
+applicable_ids = set(parse_list_any(fids_text))
 if applicable_ids and len(filters_df_full):
-    id_str=filters_df_full["id"].astype(str)
-    name_str=filters_df_full.get("name","").astype(str)
-    mask=id_str.isin(applicable_ids) | name_str.isin(applicable_ids)
-    filters_df=filters_df_full[mask].copy()
+    id_str   = filters_df_full["id"].astype(str)
+    name_str = filters_df_full.get("name","").astype(str)
+    mask = id_str.isin(applicable_ids) | name_str.isin(applicable_ids)
+    filters_df = filters_df_full[mask].copy()
 else:
-    filters_df=filters_df_full.copy()
+    filters_df = filters_df_full.copy()
 
 if exclude_parity_wipers and len(filters_df):
-    kw=["parity-wiper","parity wiper","wipe parity"]
+    kw = ["parity-wiper","parity wiper","wipe parity"]
     mask = ~(
         filters_df.get("name","").astype(str).str.lower().str.contains("|".join(kw))
         | filters_df["expression"].astype(str).str.lower().str.contains("|".join(kw))
     )
-    filters_df=filters_df[mask].copy()
+    filters_df = filters_df[mask].copy()
 st.caption(f"Filters loaded: {len(filters_df)}")
 
 # ── Run & cache ───────────────────────────────────────────────────────────────
 def run_planner_and_cache():
-    base_env=make_base_env(seed, prev_seed, prev_prev, prev_prev_prev,
-                           st.session_state.get("hot_digits",[]),
-                           st.session_state.get("cold_digits",[]),
-                           st.session_state.get("due_digits",[]))
-    pool_list=list(pool)
+    base_env = make_base_env(
+        seed, prev_seed, prev_prev, prev_prev_prev,
+        st.session_state.get("hot_digits", []),
+        st.session_state.get("cold_digits", []),
+        st.session_state.get("due_digits", []),
+    )
+    pool_list = list(pool)
 
-    rows=[]; runtime_errors={}; token_freq=defaultdict(int)
+    rows = []; runtime_errors = {}; token_freq = defaultdict(int)
 
     for _, r in filters_df.iterrows():
         if str(r.get("compile_error_applicable","")).strip():
@@ -473,68 +484,68 @@ def run_planner_and_cache():
 
         if not eval_applicable(r, base_env): continue
         eliminated, cnt = eval_filter_on_pool(r, pool_list, base_env, runtime_errors, token_freq)
-        rows.append({"id":r["id"], "name":r.get("name",""), "expression":r["expression"], "eliminated_now":cnt})
+        rows.append({"id": r["id"], "name": r.get("name",""), "expression": r["expression"], "eliminated_now": cnt})
 
     out = pd.DataFrame(rows).sort_values("eliminated_now", ascending=False) if rows else pd.DataFrame()
     pool_n = max(1, len(pool_list))
     if not out.empty:
-        out["expected_safety_%"]=(1.0 - out["eliminated_now"]/pool_n)*100.0
+        out["expected_safety_%"] = (1.0 - out["eliminated_now"] / pool_n) * 100.0
         if use_archetype_lift and arch_path and os.path.exists(arch_path):
             try:
-                lift_df=pd.read_csv(arch_path, engine="python")
-                fid_col="id" if "id" in lift_df.columns else ("filter_id" if "filter_id" in lift_df.columns else None)
-                lift_col="lift" if "lift" in lift_df.columns else ("safety_lift" if "safety_lift" in lift_df.columns else None)
+                lift_df = pd.read_csv(arch_path, engine="python")
+                fid_col = "id" if "id" in lift_df.columns else ("filter_id" if "filter_id" in lift_df.columns else None)
+                lift_col = "lift" if "lift" in lift_df.columns else ("safety_lift" if "safety_lift" in lift_df.columns else None)
                 if fid_col and lift_col:
-                    lift_df=lift_df[[fid_col,lift_col]].rename(columns={fid_col:"id", lift_col:"lift"})
-                    out=out.merge(lift_df, how="left", on="id")
-                    out["expected_safety_lifted_%"]=out["expected_safety_%"]*(out["lift"].fillna(1.0))
+                    lift_df = lift_df[[fid_col, lift_col]].rename(columns={fid_col:"id", lift_col:"lift"})
+                    out = out.merge(lift_df, how="left", on="id")
+                    out["expected_safety_lifted_%"] = out["expected_safety_%"] * (out["lift"].fillna(1.0))
             except Exception as e:
                 st.warning(f"Archetype lift merge skipped: {e}")
 
-    large_only = out[out["eliminated_now"]>=min_large] if not out.empty else pd.DataFrame()
+    large_only = out[out["eliminated_now"] >= min_large] if not out.empty else pd.DataFrame()
 
     # Winner-preserving plan
-    winner_plan=pd.DataFrame()
+    winner_plan = pd.DataFrame()
     if seed and not out.empty:
-        rows_keep=[]
+        rows_keep = []
         for _, r in out.iterrows():
-            row_full=filters_df.loc[filters_df["id"]==r["id"]].iloc[0]
-            env_seed=combo_env(base_env, seed)
+            row_full = filters_df.loc[filters_df["id"]==r["id"]].iloc[0]
+            env_seed = combo_env(base_env, seed)
             try:
-                globs={"__builtins__":{}}; globs.update(env_seed)
+                globs = {"__builtins__": {}}; globs.update(env_seed)
                 knocks_winner = bool(eval(row_full["expr_code"], globs, env_seed))
             except Exception:
-                knocks_winner=False
-            if not knocks_winner and r["eliminated_now"]>=min_large:
+                knocks_winner = False
+            if not knocks_winner and r["eliminated_now"] >= min_large:
                 rows_keep.append(r)
-        winner_plan=pd.DataFrame(rows_keep)
+        winner_plan = pd.DataFrame(rows_keep)
 
     # Reducer (playlist mode)
-    kept_combos=list(pool_list); removed=set(); applied_ids=[]
-    if not out.empty and mode=="Playlist Reducer":
-        current_pool=set(kept_combos); candidates=out.copy()
+    kept_combos = list(pool_list); removed = set(); applied_ids = []
+    if not out.empty and mode == "Playlist Reducer":
+        current_pool = set(kept_combos); candidates = out.copy()
         for _ in range(greedy_steps):
             if candidates.empty or not current_pool: break
-            cand_rows=[]
+            cand_rows = []
             for _, r in candidates.iterrows():
                 fid=r["id"]; row_full=filters_df.loc[filters_df["id"]==fid].iloc[0]
                 elim,cnt=eval_filter_on_pool(row_full, list(current_pool), base_env, {}, defaultdict(int))
                 cand_rows.append((fid, r.get("name",""), cnt, elim))
             cand_rows.sort(key=lambda x: x[2], reverse=True)
-            top=cand_rows[:greedy_beam]
+            top = cand_rows[:greedy_beam]
             for fid, nm, cnt, elimset in top:
-                if cnt<=0: continue
+                if cnt <= 0: continue
                 applied_ids.append(str(fid))
                 current_pool -= set(elimset)
                 removed |= set(elimset)
             candidates = candidates[~candidates["id"].astype(str).isin(applied_ids)]
-        kept_combos=sorted(list(current_pool))
+        kept_combos = sorted(list(current_pool))
 
-    kept_df=pd.DataFrame({"Result":kept_combos})
-    rem_df =pd.DataFrame({"Result":sorted(list(removed))})
+    kept_df = pd.DataFrame({"Result": kept_combos})
+    rem_df  = pd.DataFrame({"Result": sorted(list(removed))})
 
     # Skips + undefined-token frequency
-    skipped_records=dict(runtime_errors)
+    skipped_records = dict(runtime_errors)
     for _, r in filters_df.iterrows():
         if str(r.get("compile_error_applicable","")).strip() or str(r.get("compile_error_expr","")).strip():
             fid=str(r.get("id","")); fname=str(r.get("name",""))
@@ -551,24 +562,27 @@ def run_planner_and_cache():
                           columns=["symbol","error_count"]) if token_freq else pd.DataFrame()
 
     st.session_state["last_run"] = {
-        "out":out, "large_only":large_only, "winner_plan":winner_plan,
-        "kept_df":kept_df, "rem_df":rem_df, "skipped_df":skipped_df, "tok_df":tok_df,
+        "out": out, "large_only": large_only, "winner_plan": winner_plan,
+        "kept_df": kept_df, "rem_df": rem_df, "skipped_df": skipped_df, "tok_df": tok_df,
     }
 
 run = st.button("▶ Run Planner + Recommender", type="primary", disabled=(len(pool)==0 or len(filters_df)==0))
-if run: run_planner_and_cache()
+if run:
+    run_planner_and_cache()
 
 # ── Render from cache (downloads don’t reset) ─────────────────────────────────
 if "last_run" in st.session_state and st.session_state["last_run"]:
-    R=st.session_state["last_run"]
+    R = st.session_state["last_run"]
     out, large_only = R["out"], R["large_only"]
     winner_plan = R["winner_plan"]
     kept_df, rem_df = R["kept_df"], R["rem_df"]
     skipped_df, tok_df = R["skipped_df"], R["tok_df"]
 
     st.subheader("Filter Diagnostics")
-    if out is None or out.empty: st.info("No filters evaluated / nothing eliminated.")
-    else: st.dataframe(out, use_container_width=True)
+    if out is None or out.empty:
+        st.info("No filters evaluated / nothing eliminated.")
+    else:
+        st.dataframe(out, use_container_width=True)
 
     if large_only is not None and not large_only.empty:
         st.subheader("Best-case plan — Large filters only")
@@ -576,8 +590,10 @@ if "last_run" in st.session_state and st.session_state["last_run"]:
 
     st.subheader("Winner-preserving plan — Large filters only")
     if seed:
-        if winner_plan is not None and not winner_plan.empty: st.dataframe(winner_plan, use_container_width=True)
-        else: st.caption("No large filters that both eliminate many and keep the known winner.")
+        if winner_plan is not None and not winner_plan.empty:
+            st.dataframe(winner_plan, use_container_width=True)
+        else:
+            st.caption("No large filters that both eliminate many and keep the known winner.")
     else:
         st.caption("Provide a 5-digit Known winner to compute a winner-preserving plan.")
 
