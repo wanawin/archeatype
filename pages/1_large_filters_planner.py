@@ -1,6 +1,6 @@
-# large_filters_planner_FULL_v5.py
+# large_filters_planner_FULL_v6.py
 # Streamlit app: robust envs + alias map + safe fallbacks for unknown symbols,
-# H/C/D linked to UI, VTRAC v4 + mirrors (with exhaustive VTRAC aliases),
+# H/C/D linked to UI, VTRAC v4 + exhaustive aliases, automatic alias rules for common/typo'd names,
 # planners, and detailed skip summaries.
 
 from __future__ import annotations
@@ -19,18 +19,18 @@ from collections import Counter
 # ==============================
 # Page
 # ==============================
-st.set_page_config(page_title="Large Filters Planner — FULL v5", layout="wide")
-st.title("Large Filters Planner — FULL v5")
+st.set_page_config(page_title="Large Filters Planner — FULL v6", layout="wide")
+st.title("Large Filters Planner — FULL v6")
 
 # ==============================
 # Core maps & helpers
 # ==============================
 # VTRAC v4 (standard)
 VTRAC: Dict[int, int]  = {0:1,5:1, 1:2,6:2, 2:3,7:3, 3:4,8:4, 4:5,9:5}
-V_TRAC_GROUPS: Dict[int, int] = VTRAC  # legacy alias
+V_TRAC_GROUPS: Dict[int, int] = VTRAC
 
 MIRROR: Dict[int, int] = {0:5,5:0,1:6,6:1,2:7,7:2,3:8,8:3,4:9,9:4}
-mirror = MIRROR  # some CSVs reference lowercase
+mirror = MIRROR
 
 SAFE_BUILTINS = {
     "abs": abs, "int": int, "str": str, "float": float, "round": round,
@@ -300,6 +300,121 @@ def inject_vtrac_aliases(env: Dict) -> Dict:
     env.update(set_aliases)
     env.update(scalar_aliases)
     return env
+
+# ---------- NEW: Auto-alias rules ----------
+def _norm_ident(name: str) -> str:
+    s = re.sub(r"[^A-Za-z0-9]+", "_", str(name)).strip("_")
+    return s.lower()
+
+# Core rule map: normalized key -> python expression (string) to evaluate in env
+AUTO_ALIAS_RULES: Dict[str, str] = {
+    # hot / cold / due (sets & counters)
+    "hotnumbers": "hot_digits",
+    "hotdigits": "hot_digits",
+    "hot": "hot_digits",
+    "hot_set": "hot_set",
+    "coldnumbers": "cold_digits",
+    "colddigits": "cold_digits",
+    "cold": "cold_digits",
+    "cold_set": "cold_set",
+    "duenumbers": "due_digits",
+    "duedigits": "due_digits",
+    "due": "due_digits",
+    "due_set": "due_set",
+    "counthot": "count_in_hot(combo_digits)",
+    "countcold": "count_in_cold(combo_digits)",
+    "countdue": "count_in_due(combo_digits)",
+    "percenthot": "percent_hot(combo_digits)",
+    "percentcold": "percent_cold(combo_digits)",
+    "percentdue": "percent_due(combo_digits)",
+
+    # mirror
+    "mirrorpairs": "mirror_pairs",
+    "hasmirrorpair": "has_mirror_pair",
+    "hasmirror": "has_mirror_pair",
+    "mirrordigits": "combo_mirror_digits",
+    "mirrors": "combo_mirror_digits",
+    "mirrorset": "set(combo_mirror_digits)",
+    "seedmirrordigits": "seed_mirror_digits",
+
+    # seed / combo synonyms
+    "seeddigits": "seed_digits",
+    "seedset": "set(seed_digits)",
+    "combodigits": "combo_digits",
+    "comboset": "set(combo_digits)",
+    "combo": "combo",  # literal
+
+    # parity / even-odd
+    "parityeven": "combo_sum_is_even",
+    "iseven": "combo_sum_is_even",
+    "isodd": "not combo_sum_is_even",
+    "evencount": "even_count(combo_digits)",
+    "oddcount": "odd_count(combo_digits)",
+
+    # high / low
+    "highcount": "high_count(combo_digits)",
+    "lowcount": "low_count(combo_digits)",
+    "isallhigh": "is_all_high(combo_digits)",
+    "isalllow": "is_all_low(combo_digits)",
+
+    # first / last / last two
+    "firstdigit": "first_digit(combo_digits)",
+    "lastdigit": "last_digit(combo_digits)",
+    "lasttwo": "last_two_digits(combo_digits)",
+
+    # sums / spread / structure
+    "sumdigits": "digit_sum(combo_digits)",
+    "digitsum": "digit_sum(combo_digits)",
+    "spreadband": "spread_band(spread)",
+    "structure": "combo_structure",
+
+    # vtrac catch-alls (beyond the exhaustive injection)
+    "vtrack": "VTRAC",
+    "vtracks": "VTRAC",
+    "vtracgroups": "VTRAC",
+    "vtracset": "combo_vtracs",
+    "combovtracs": "combo_vtracs",
+    "seedvtracs": "seed_vtracs",
+    "vtraclast": "combo_last_vtrac",
+    "lastvtrac": "combo_last_vtrac",
+}
+
+def _propose_auto_alias(name: str) -> Optional[Tuple[str, str]]:
+    """
+    Given a missing identifier, return (name, expression) if a rule applies.
+    """
+    key = _norm_ident(name)
+    if key in AUTO_ALIAS_RULES:
+        return name, AUTO_ALIAS_RULES[key]
+    # heuristic: plural → singular
+    if key.endswith("s") and key[:-1] in AUTO_ALIAS_RULES:
+        return name, AUTO_ALIAS_RULES[key[:-1]]
+    # heuristic: prefix 'is_' / 'has_'
+    if key.startswith("is_") and key[3:] in AUTO_ALIAS_RULES:
+        return name, AUTO_ALIAS_RULES[key[3:]]
+    if key.startswith("has_") and key[4:] in AUTO_ALIAS_RULES:
+        return name, AUTO_ALIAS_RULES[key[4:]]
+    return None
+
+def apply_auto_alias_rules(unknown_names: Set[str], env: Dict, record: List[dict], fid: str, fname: str) -> Dict[str, object]:
+    """
+    For each unknown name, see if a rule applies; evaluate RHS in env and return a dict of {name: value}.
+    Log as 'auto_alias_rule' when successful.
+    """
+    created = {}
+    for n in sorted(unknown_names):
+        prop = _propose_auto_alias(n)
+        if not prop: continue
+        nm, rhs = prop
+        try:
+            code = compile(rhs, f"<auto_alias:{nm}>", "eval")
+            val = eval(code, {"__builtins__": {}}, {**SAFE_BUILTINS, **env})
+            created[nm] = val
+            record.append({"filter_id": fid, "name": fname, "stage": "auto_alias_rule", "error": "", "missing": nm})
+        except Exception as e:
+            # If the alias expression fails, skip silently; the general placeholder fallback can still run.
+            record.append({"filter_id": fid, "name": fname, "stage": "auto_alias_rule_fail", "error": str(e), "missing": nm})
+    return created
 
 # ==============================
 # Env builders
@@ -575,7 +690,7 @@ def load_filters_from_source(pasted_csv_text: str, uploaded_csv_file, csv_path: 
     return normalize_filters_df(df)
 
 # ==============================
-# Missing symbol handling (aliases + safe fallbacks)
+# Missing symbol handling (aliases + safe fallbacks + auto rules)
 # ==============================
 def parse_alias_lines(text: str) -> Dict[str, str]:
     out = {}
@@ -607,13 +722,14 @@ def discover_unknown_names(expr: str, env: Dict[str, object]) -> Set[str]:
     known = set(env.keys()) | set(SAFE_BUILTINS.keys()) | PY_KEYWORDS
     return {n for n in names if n not in known}
 
+class _Stub:
+    def __call__(self, *a, **k): return False
+    def __bool__(self): return False
+    def __float__(self): return 0.0
+    def __int__(self): return 0
+    def __repr__(self): return "/*auto_stub*/0"
+
 def make_placeholders(unknown: Set[str]) -> Dict[str, object]:
-    class _Stub:
-        def __call__(self, *a, **k): return False
-        def __bool__(self): return False
-        def __float__(self): return 0.0
-        def __int__(self): return 0
-        def __repr__(self): return "/*auto_stub*/0"
     stub = _Stub()
     return {name: stub for name in unknown}
 
@@ -818,6 +934,11 @@ with st.sidebar:
     beam_wp = st.number_input("WP beam width", min_value=1, max_value=20, value=3, step=1)
     steps_wp = st.number_input("WP max steps", min_value=1, max_value=50, value=12, step=1)
 
+    st.markdown("---")
+    st.header("Unknown names")
+    enable_auto_alias = st.checkbox("Enable auto-alias rules (recommended)", value=True)
+    enable_auto_stub  = st.checkbox("Enable safe fallback placeholders (False/0)", value=True)
+
 # ==============================
 # Seed / HCD
 # ==============================
@@ -954,7 +1075,8 @@ if alias_upload is not None:
         st.warning("Alias CSV unreadable; ignoring.")
 
 with fallback_col:
-    auto_stub_unknowns = st.checkbox("Treat still-unknown symbols as safe False/0 (recommended)", value=True)
+    st.checkbox("Enable auto-alias rules (sidebar)", value=True, disabled=True)
+    st.checkbox("Enable safe fallback placeholders (sidebar)", value=True, disabled=True)
 
 # ==============================
 # RUN
@@ -976,7 +1098,7 @@ if alias_values:
 st.info(f"Using Hot/Cold/Due everywhere → hot={hot_digits} • cold={cold_digits} • due={due_digits}", icon="🔥")
 
 # ==============================
-# Evaluation helpers (aliases + fallback)
+# Evaluation helpers (aliases + fallback + auto rules)
 # ==============================
 def _missing_name_from_exc(err: Exception) -> Optional[str]:
     m = re.search(r"name '([^']+)' is not defined", str(err))
@@ -991,44 +1113,61 @@ def compile_with_placeholders(expr: str, env: Dict, skip_log: List[dict], fid: s
         skip_log.append({"filter_id": fid, "name": name, "stage": f"{stage_prefix}_compile", "error": str(e), "missing": _missing_name_from_exc(e)})
         return None, {}
 
-def ensure_placeholders(expr: str, env: Dict, allow_auto: bool, recorded: List[dict], fid: str, name: str) -> Dict[str, object]:
-    if not allow_auto: return {}
+def ensure_aliases_and_placeholders(expr: str, env: Dict, allow_auto_alias: bool, allow_auto_stub: bool,
+                                    recorded: List[dict], fid: str, name: str) -> Dict[str, object]:
+    """Apply auto-alias rules first, then placeholders for any still-unknowns."""
+    added = {}
     unknown = discover_unknown_names(expr, env)
-    if not unknown: return {}
-    ph = make_placeholders(unknown)
-    for n in sorted(unknown):
-        recorded.append({"filter_id": fid, "name": name, "stage": "auto_placeholder", "error": "", "missing": n})
-    return ph
+    if allow_auto_alias and unknown:
+        created = apply_auto_alias_rules(unknown, env, recorded, fid, name)
+        if created:
+            env.update(created)
+            added.update(created)
+            # Recompute unknowns after alias application
+            unknown = discover_unknown_names(expr, env)
+    if allow_auto_stub and unknown:
+        ph = make_placeholders(unknown)
+        for n in sorted(unknown):
+            recorded.append({"filter_id": fid, "name": name, "stage": "auto_placeholder", "error": "", "missing": n})
+        added.update(ph)
+    return added
 
-def eval_expr(expr: str, env: Dict, skip_log: List[dict], fid: str, name: str, stage_prefix: str, allow_auto=True) -> Optional[bool]:
+def eval_expr(expr: str, env: Dict, skip_log: List[dict], fid: str, name: str, stage_prefix: str,
+              allow_auto_alias=True, allow_auto_stub=True) -> Optional[bool]:
     code, _ = compile_with_placeholders(expr, env, skip_log, fid, name, stage_prefix)
     if code is None: return None
-    placeholders = ensure_placeholders(expr, env, allow_auto, skip_log, fid, name)
+    # Inject auto-aliases and/or placeholders
+    extras = ensure_aliases_and_placeholders(expr, env, allow_auto_alias, allow_auto_stub, skip_log, fid, name)
     try:
-        return bool(eval(code, {"__builtins__": {}}, {**SAFE_BUILTINS, **env, **placeholders}))
+        return bool(eval(code, {"__builtins__": {}}, {**SAFE_BUILTINS, **env, **extras}))
     except Exception as e:
+        # One more try: if NameError happens, attempt to add placeholder for the one missing
         miss = _missing_name_from_exc(e)
-        if miss and allow_auto:
+        if miss and allow_auto_stub:
             more = make_placeholders({miss})
             try:
-                return bool(eval(code, {"__builtins__": {}}, {**SAFE_BUILTINS, **env, **placeholders, **more}))
+                return bool(eval(code, {"__builtins__": {}}, {**SAFE_BUILTINS, **env, **extras, **more}))
             except Exception as e2:
                 skip_log.append({"filter_id": fid, "name": name, "stage": f"{stage_prefix}_eval", "error": str(e2), "missing": _missing_name_from_exc(e2)})
                 return None
         skip_log.append({"filter_id": fid, "name": name, "stage": f"{stage_prefix}_eval", "error": str(e), "missing": miss})
         return None
 
-def eval_applicable_with_error(applicable_if: str, base_env: Dict, fid: str, name: str, skip_log: List[dict], allow_auto=True) -> bool:
-    res = eval_expr(str(applicable_if), base_env, skip_log, fid, name, "applicable_if", allow_auto=allow_auto)
+def eval_applicable_with_error(applicable_if: str, base_env: Dict, fid: str, name: str, skip_log: List[dict],
+                               allow_auto_alias=True, allow_auto_stub=True) -> bool:
+    res = eval_expr(str(applicable_if), base_env, skip_log, fid, name, "applicable_if",
+                    allow_auto_alias=allow_auto_alias, allow_auto_stub=allow_auto_stub)
     if res is None: return True
     return bool(res)
 
-def eval_filter_on_pool_with_errors(row: pd.Series, pool: List[str], base_env: Dict, skip_log: List[dict], allow_auto=True) -> Tuple[Set[str], int, int, int]:
+def eval_filter_on_pool_with_errors(row: pd.Series, pool: List[str], base_env: Dict, skip_log: List[dict],
+                                    allow_auto_alias=True, allow_auto_stub=True) -> Tuple[Set[str], int, int, int]:
     expr = str(row["expression"]); fid = str(row["id"]); name = str(row.get("name",""))
     eliminated: Set[str] = set(); elim_even = elim_odd = 0
     for c in pool:
         env = combo_env(base_env, c)
-        ok = eval_expr(expr, env, skip_log, fid, name, "expr", allow_auto=allow_auto)
+        ok = eval_expr(expr, env, skip_log, fid, name, "expr",
+                       allow_auto_alias=allow_auto_alias, allow_auto_stub=allow_auto_stub)
         if ok is True:
             eliminated.add(c)
             if env["combo_sum_is_even"]: elim_even += 1
@@ -1038,14 +1177,15 @@ def eval_filter_on_pool_with_errors(row: pd.Series, pool: List[str], base_env: D
 def safety_on_history_with_errors(expr: str, winners_list: List[str], sd_now: List[int],
                                   fid: str, name: str, skip_log: List[dict],
                                   hot_digits: List[int], cold_digits: List[int], due_digits: List[int],
-                                  allow_auto=True) -> Tuple[Optional[float], int, int]:
+                                  allow_auto_alias=True, allow_auto_stub=True) -> Tuple[Optional[float], int, int]:
     if not winners_list or len(winners_list) < 2: return None, 0, 0
     total_sim, bad_hits = 0, 0
     for i in range(1, len(winners_list)):
         env = build_day_env(winners_list, i, hot_digits, cold_digits, due_digits)
         if not similar_seed(env["seed_digits"], sd_now): continue
         total_sim += 1
-        ok = eval_expr(expr, env, skip_log, fid, name, "history", allow_auto=allow_auto)
+        ok = eval_expr(expr, env, skip_log, fid, name, "history",
+                       allow_auto_alias=allow_auto_alias, allow_auto_stub=allow_auto_stub)
         if ok is True:
             bad_hits += 1
     if total_sim == 0: return None, 0, 0
@@ -1063,14 +1203,21 @@ skip_log: List[dict] = []
 
 for _, r in filters_df.iterrows():
     fid = str(r["id"]); nm = str(r.get("name",""))
-    if not eval_applicable_with_error(r.get("applicable_if", "True"), base_env, fid, nm, skip_log, allow_auto=auto_stub_unknowns):
+    if not eval_applicable_with_error(r.get("applicable_if", "True"), base_env, fid, nm, skip_log,
+                                      allow_auto_alias=enable_auto_alias, allow_auto_stub=enable_auto_stub):
         continue
-    elim_set, cnt, elim_even, elim_odd = eval_filter_on_pool_with_errors(r, pool, base_env, skip_log, allow_auto=auto_stub_unknowns)
+    elim_set, cnt, elim_even, elim_odd = eval_filter_on_pool_with_errors(
+        r, pool, base_env, skip_log,
+        allow_auto_alias=enable_auto_alias, allow_auto_stub=enable_auto_stub
+    )
     names_map[fid] = nm; E_map[fid] = {pool.index(c) for c in elim_set}
     parity_wiper = ((elim_even == total_even and total_even > 0) or (elim_odd == total_odd and total_odd > 0))
     text_blob = f"{r.get('applicable_if','')} || {r.get('expression','')}"
     seed_specific = is_seed_specific(text_blob)
-    s_pct, sims, bad = safety_on_history_with_errors(r["expression"], winners_list, sd_now, fid, nm, skip_log, hot_digits, cold_digits, due_digits, allow_auto=auto_stub_unknowns)
+    s_pct, sims, bad = safety_on_history_with_errors(
+        r["expression"], winners_list, sd_now, fid, nm, skip_log, hot_digits, cold_digits, due_digits,
+        allow_auto_alias=enable_auto_alias, allow_auto_stub=enable_auto_stub
+    )
     rows.append({
         "id": r["id"], "name": nm, "expression": r["expression"],
         "elim_count_on_pool": cnt, "elim_pct_on_pool": (cnt / len(pool) * 100.0) if pool else 0.0,
@@ -1087,7 +1234,7 @@ if scored_df.empty:
 # Skips + summaries
 # ==============================
 if skip_log:
-    st.subheader("⚠️ Skipped / Errored filters")
+    st.subheader("⚠️ Skipped / Aliased / Errors")
     skip_df = pd.DataFrame(skip_log)
     agg = (skip_df.groupby(["filter_id","name","stage"])["error"]
            .count().reset_index().rename(columns={"error":"count"})
@@ -1097,22 +1244,22 @@ if skip_log:
                 .sort_values("count", ascending=False))
     top_missing = (skip_df[skip_df["missing"].notna() & (skip_df["missing"] != "")]
                    .groupby("missing").size().reset_index(name="count")
-                   .sort_values("count", ascending=False).head(15))
+                   .sort_values("count", ascending=False).head(20))
 
     cA, cB = st.columns([1,1])
     with cA:
-        st.metric("Total skipped/evaluation errors", value=total_skips)
+        st.metric("Total skip/alias/error events", value=total_skips)
     with cB:
         st.dataframe(by_stage, use_container_width=True, height=min(220, 60 + 28*len(by_stage)))
 
     if not top_missing.empty:
-        st.caption("Top undefined names (first 15):")
+        st.caption("Top still-undefined names (first 20):")
         st.dataframe(top_missing, use_container_width=True, height=min(220, 60 + 28*len(top_missing)))
 
     st.dataframe(agg, use_container_width=True, height=min(340, 60 + 28*len(agg)))
-    st.download_button("Download full skip log (CSV)", skip_df.to_csv(index=False), "filter_skip_log.csv", "text/csv")
+    st.download_button("Download full skip/alias log (CSV)", skip_df.to_csv(index=False), "filter_skip_log.csv", "text/csv")
 else:
-    st.info("No evaluation errors detected while compiling/evaluating filters.")
+    st.info("No evaluation issues detected (aliases/placeholders not needed).")
 
 # ==============================
 # Expected safety + recommendations
@@ -1271,14 +1418,12 @@ cB.download_button("Download REMOVED combos (TXT)", "\n".join(removed), file_nam
 with st.expander("Column guide", expanded=False):
     st.markdown(
         """
-- **elim_count_on_pool** – Eliminations on your provided pool (aggression metric).
-- **elim_even / elim_odd** – Split of eliminations; helps spot parity-wipers.
-- **parity_wiper** – True if a filter wipes all evens or all odds in your pool (optionally excluded).
-- **seed_specific_trigger** – Filter references seed/prev-seed signals.
-- **historic_safety_pct** – On similar seeds in history, % of days the filter kept the true winner.
+- **auto_alias_rule** – A missing name matched a known synonym and was auto-mapped to a supported value.
+- **auto_placeholder** – A missing name was stubbed (False/0) so evaluation could continue.
+- **elim_count_on_pool** – Eliminations on your pool (aggression metric).
+- **parity_wiper** – True if a filter wipes all evens or all odds (optionally excluded).
+- **historic_safety_pct** – On similar seeds in history, % days the filter kept the true winner.
 - **expected_safety_pct** – Safety adjusted for current seed archetype (or 50% baseline).
 - **recommend_score** – Eliminations × expected safety.
-- **Best-case plan** – Greedy order to reach ≤ target using expected safety.
-- **Winner-preserving plan** – Order of Large filters that keeps a known winner.
         """
     )
