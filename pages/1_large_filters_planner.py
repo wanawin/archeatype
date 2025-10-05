@@ -1,6 +1,7 @@
-# large_filters_planner_FULL_v4.py
+# large_filters_planner_FULL_v5.py
 # Streamlit app: robust envs + alias map + safe fallbacks for unknown symbols,
-# H/C/D linked to UI, VTRAC v4 + mirrors, planners, and detailed skip summaries.
+# H/C/D linked to UI, VTRAC v4 + mirrors (with exhaustive VTRAC aliases),
+# planners, and detailed skip summaries.
 
 from __future__ import annotations
 
@@ -18,18 +19,18 @@ from collections import Counter
 # ==============================
 # Page
 # ==============================
-st.set_page_config(page_title="Large Filters Planner — FULL v4", layout="wide")
-st.title("Large Filters Planner — FULL v4")
+st.set_page_config(page_title="Large Filters Planner — FULL v5", layout="wide")
+st.title("Large Filters Planner — FULL v5")
 
 # ==============================
 # Core maps & helpers
 # ==============================
 # VTRAC v4 (standard)
 VTRAC: Dict[int, int]  = {0:1,5:1, 1:2,6:2, 2:3,7:3, 3:4,8:4, 4:5,9:5}
-V_TRAC_GROUPS: Dict[int, int] = VTRAC
+V_TRAC_GROUPS: Dict[int, int] = VTRAC  # legacy alias
 
 MIRROR: Dict[int, int] = {0:5,5:0,1:6,6:1,2:7,7:2,3:8,8:3,4:9,9:4}
-mirror = MIRROR
+mirror = MIRROR  # some CSVs reference lowercase
 
 SAFE_BUILTINS = {
     "abs": abs, "int": int, "str": str, "float": float, "round": round,
@@ -39,11 +40,7 @@ SAFE_BUILTINS = {
     "math": math, "re": re, "random": random, "Counter": Counter,
     "True": True, "False": False, "None": None,
 }
-
-PY_KEYWORDS = {
-    "and","or","not","in","is","if","else","for","while","return","lambda","def",
-    "True","False","None"
-}
+PY_KEYWORDS = {"and","or","not","in","is","if","else","for","while","return","lambda","def","True","False","None"}
 
 def digits_of(s: str) -> List[int]:
     s = str(s).strip()
@@ -81,8 +78,7 @@ def parse_list_any(text: str) -> List[str]:
 
 def seed_features(digs: List[int]) -> Tuple[str, str, str]:
     if not digs: return "", "", ""
-    s = sum(digs)
-    parity = "Even" if s % 2 == 0 else "Odd"
+    s = sum(digs); parity = "Even" if s % 2 == 0 else "Odd"
     return sum_category(s), parity, classify_structure(digs)
 
 def seed_profile(seed: str, prev_seed: str = "", prev_prev: str = "") -> Dict[str, object]:
@@ -142,17 +138,10 @@ def digit_sum(x):
     ds = safe_digits(x)
     return sum(ds) if ds else 0
 
-def even_count(x):
-    return sum(1 for d in safe_digits(x) if d % 2 == 0)
-
-def odd_count(x):
-    return sum(1 for d in safe_digits(x) if d % 2 == 1)
-
-def high_count(x):
-    return sum(1 for d in safe_digits(x) if d >= 5)
-
-def low_count(x):
-    return sum(1 for d in safe_digits(x) if d <= 4)
+def even_count(x): return sum(1 for d in safe_digits(x) if d % 2 == 0)
+def odd_count(x):  return sum(1 for d in safe_digits(x) if d % 2 == 1)
+def high_count(x): return sum(1 for d in safe_digits(x) if d >= 5)
+def low_count(x):  return sum(1 for d in safe_digits(x) if d <= 4)
 
 def parity_even(n):
     try:
@@ -173,12 +162,8 @@ def vtrac_count(digs):
     except Exception:
         return 0
 
-def pair_count(digs):
-    c = Counter(safe_digits(digs))
-    return sum(1 for _, v in c.items() if v >= 2)
-
-def has_pair(digs):
-    return pair_count(digs) > 0
+def pair_count(digs): return sum(1 for _, v in Counter(safe_digits(digs)).items() if v >= 2)
+def has_pair(digs):   return pair_count(digs) > 0
 
 def safe_div(a, b):
     try:
@@ -186,33 +171,19 @@ def safe_div(a, b):
     except Exception:
         return 0.0
 
-def digits_intersection(a, b):
-    return sorted(set(safe_digits(a)) & set(safe_digits(b)))
-
-def digits_union(a, b):
-    return sorted(set(safe_digits(a)) | set(safe_digits(b)))
+def digits_intersection(a, b): return sorted(set(safe_digits(a)) & set(safe_digits(b)))
+def digits_union(a, b):        return sorted(set(safe_digits(a)) | set(safe_digits(b)))
 
 def _mk_is_hot(env):  return lambda d: (str(d).isdigit() and int(d) in env.get("hot_set", set()))
 def _mk_is_cold(env): return lambda d: (str(d).isdigit() and int(d) in env.get("cold_set", set()))
 def _mk_is_due(env):  return lambda d: (str(d).isdigit() and int(d) in env.get("due_set", set()))
 
-def first_digit(x):
-    ds = safe_digits(x); return ds[0] if ds else None
-
-def last_digit(x):
-    ds = safe_digits(x); return ds[-1] if ds else None
-
-def last_two_digits(x):
-    ds = safe_digits(x); return ds[-2:] if len(ds) >= 2 else ds
-
-def unique_count(x):
-    return len(set(safe_digits(x)))
-
-def max_repeat(x):
-    c = Counter(safe_digits(x)); return max(c.values()) if c else 0
-
-def has_triplet(x):
-    return max_repeat(x) >= 3
+def first_digit(x): ds = safe_digits(x); return ds[0] if ds else None
+def last_digit(x):  ds = safe_digits(x); return ds[-1] if ds else None
+def last_two_digits(x): ds = safe_digits(x); return ds[-2:] if len(ds) >= 2 else ds
+def unique_count(x): return len(set(safe_digits(x)))
+def max_repeat(x):  c = Counter(safe_digits(x)); return max(c.values()) if c else 0
+def has_triplet(x): return max_repeat(x) >= 3
 
 def digit_span(x):
     ds = safe_digits(x); return (max(ds) - min(ds)) if ds else 0
@@ -247,6 +218,89 @@ def between(v, lo, hi):
     except Exception:
         return False
 
+# ---------- VTRAC helpers & alias injector ----------
+def vtrac_group_of_digit(d: int) -> Optional[int]:
+    try:
+        return VTRAC[int(d)]
+    except Exception:
+        return None
+
+def vtrac_digits(x) -> List[int]:
+    return [VTRAC[d] for d in safe_digits(x) if d in VTRAC]
+
+def vtrac_hist(x) -> Dict[int, int]:
+    return dict(Counter(vtrac_digits(x)))
+
+def count_vtrac_groups(x) -> int:
+    return len(set(vtrac_digits(x)))
+
+def has_vtrac_group(x, g) -> bool:
+    try:
+        g = int(g)
+    except Exception:
+        return False
+    return g in set(vtrac_digits(x))
+
+def last_vtrac(x) -> Optional[int]:
+    ds = safe_digits(x)
+    return VTRAC[ds[-1]] if ds else None
+
+def inject_vtrac_aliases(env: Dict) -> Dict:
+    """Insert *many* VTRAC aliases into env so CSVs with different spellings “just work”."""
+    vtrac_map = VTRAC
+    sd = env.get("seed_digits", [])
+    cd = env.get("combo_digits", [])
+    seed_vtracs_set = set(VTRAC[d] for d in sd) if sd else set()
+    combo_vtracs_set = set(VTRAC[d] for d in cd) if cd else set()
+    env["seed_last_vtrac"] = last_vtrac(sd) if sd else None
+    env["combo_last_vtrac"] = last_vtrac(cd) if cd else None
+
+    dict_aliases = {
+        "VTRAC": vtrac_map, "V_TRAC": vtrac_map, "V_TRAC_GROUPS": vtrac_map,
+        "VTRAC_GROUPS": vtrac_map, "vtrac": vtrac_map, "v_trac": vtrac_map,
+        "vtrac_groups": vtrac_map, "v_trac_groups": vtrac_map,
+        "vtrack": vtrac_map, "v_track": vtrac_map, "vtracks": vtrac_map, "v_tracks": vtrac_map,
+        "vtrac_map": vtrac_map, "v_groups": vtrac_map, "vgroup_map": vtrac_map
+    }
+
+    func_aliases = {
+        "vtrac_of": vtrac_group_of_digit, "vtrac": vtrac_group_of_digit,
+        "get_vtrac": vtrac_group_of_digit, "to_vtrac": vtrac_group_of_digit,
+        "vtrack_of": vtrac_group_of_digit, "map_vtrac": vtrac_group_of_digit,
+
+        "vtrac_digits": vtrac_digits, "digits_to_vtrac": vtrac_digits, "to_vtrac_digits": vtrac_digits,
+
+        "vtrac_hist": vtrac_hist, "vtrac_counts": vtrac_hist,
+
+        "vtrac_count": count_vtrac_groups, "count_vtrac_groups": count_vtrac_groups, "vgroups_count": count_vtrac_groups,
+
+        "vtrac_span": vtrac_span, "span_vtrac": vtrac_span, "vgroup_span": vtrac_span,
+
+        "has_vtrac_group": has_vtrac_group, "contains_vtrac_group": has_vtrac_group,
+
+        "last_vtrac": last_vtrac, "vtrac_last": last_vtrac,
+    }
+
+    set_aliases = {
+        "seed_vtracs": seed_vtracs_set, "seed_vtrac_groups": seed_vtracs_set,
+        "seed_vgroup_set": seed_vtracs_set, "seed_v_groups": seed_vtracs_set,
+        "combo_vtracs": combo_vtracs_set, "combo_vtrac_groups": combo_vtracs_set,
+        "combo_vgroup_set": combo_vtracs_set, "combo_v_groups": combo_vtracs_set,
+    }
+
+    scalar_aliases = {
+        "seed_last_vtrac": env.get("seed_last_vtrac"),
+        "combo_last_vtrac": env.get("combo_last_vtrac"),
+        "last_vtrac_seed": env.get("seed_last_vtrac"),
+        "last_vtrac_combo": env.get("combo_last_vtrac"),
+    }
+
+    env.update(dict_aliases)
+    env.update(func_aliases)
+    env.update(set_aliases)
+    env.update(scalar_aliases)
+    return env
+
 # ==============================
 # Env builders
 # ==============================
@@ -267,7 +321,6 @@ def make_base_env(seed: str, prev_seed: str, prev_prev_seed: str,
     common_to_both = set(sd) & set(sd2)
 
     env = {
-        # seed & history
         "seed_digits": sd, "prev_seed_digits": sd2, "prev_prev_seed_digits": sd3,
         "seed_digits_1": sd2, "seed_digits_2": sd3, "seed_digits_3": [],
         "new_seed_digits": list(set(sd) - set(sd2)),
@@ -277,20 +330,16 @@ def make_base_env(seed: str, prev_seed: str, prev_prev_seed: str,
         "prev_pattern": _make_prev_pattern(sd3, sd2, sd),
         "common_to_both": common_to_both, "last2": last2,
 
-        # maps
         "VTRAC": VTRAC, "V_TRAC_GROUPS": V_TRAC_GROUPS,
         "mirror": MIRROR, "MIRROR": MIRROR,
 
-        # H/C/D from UI
         "hot_digits": sorted(set(hot_digits)), "cold_digits": sorted(set(cold_digits)), "due_digits": sorted(set(due_digits)),
         "hot": sorted(set(hot_digits)), "cold": sorted(set(cold_digits)), "due": sorted(set(due_digits)),
         "hot_set": set(hot_digits), "cold_set": set(cold_digits), "due_set": set(due_digits),
 
-        # mirror helpers
         "mirror_of": (lambda d: MIRROR.get(int(d), int(d)) if str(d).isdigit() else d),
         "seed_mirror_digits": sorted({MIRROR[d] for d in sd}) if sd else [],
 
-        # builtins
         **SAFE_BUILTINS,
 
         # combo placeholders
@@ -323,6 +372,7 @@ def make_base_env(seed: str, prev_seed: str, prev_prev_seed: str,
     env["is_hot"]  = _mk_is_hot(env)
     env["is_cold"] = _mk_is_cold(env)
     env["is_due"]  = _mk_is_due(env)
+    env = inject_vtrac_aliases(env)
     return env
 
 def combo_env(base_env: Dict, combo: str) -> Dict:
@@ -363,6 +413,7 @@ def combo_env(base_env: Dict, combo: str) -> Dict:
     env["is_hot"]  = _mk_is_hot(env)
     env["is_cold"] = _mk_is_cold(env)
     env["is_due"]  = _mk_is_due(env)
+    env = inject_vtrac_aliases(env)
     return env
 
 def build_day_env(winners_list: List[str], i: int,
@@ -435,6 +486,7 @@ def build_day_env(winners_list: List[str], i: int,
     env['is_hot']  = _mk_is_hot(env)
     env['is_cold'] = _mk_is_cold(env)
     env['is_due']  = _mk_is_due(env)
+    env = inject_vtrac_aliases(env)
     return env
 
 # ==============================
@@ -523,31 +575,21 @@ def load_filters_from_source(pasted_csv_text: str, uploaded_csv_file, csv_path: 
     return normalize_filters_df(df)
 
 # ==============================
-# Missing symbol handling
+# Missing symbol handling (aliases + safe fallbacks)
 # ==============================
 def parse_alias_lines(text: str) -> Dict[str, str]:
-    """
-    Parse lines like:
-      name = expression
-    Returns dict name->expression (string). Blank/comment lines ignored.
-    """
     out = {}
     for raw in text.splitlines():
         line = raw.strip()
         if not line or line.startswith("#"): continue
         if "=" not in line: continue
         name, expr = line.split("=", 1)
-        name = name.strip()
-        expr = expr.strip()
+        name = name.strip(); expr = expr.strip()
         if re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", name) and expr:
             out[name] = expr
     return out
 
 def build_alias_env(alias_map: Dict[str, str], base_env: Dict) -> Dict[str, object]:
-    """
-    Evaluate RHS expressions of alias_map in a SAFE context and return name->value.
-    If an RHS uses names, it can reference helpers already in base_env.
-    """
     out = {}
     for name, expr in alias_map.items():
         try:
@@ -555,30 +597,17 @@ def build_alias_env(alias_map: Dict[str, str], base_env: Dict) -> Dict[str, obje
             val = eval(code, {"__builtins__": {}}, {**SAFE_BUILTINS, **base_env})
             out[name] = val
         except Exception:
-            # If the alias RHS fails, leave it out; it will be logged if referenced.
             continue
     return out
 
 NAME_PATTERN = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\b")
 
 def discover_unknown_names(expr: str, env: Dict[str, object]) -> Set[str]:
-    """
-    Find tokens that look like identifiers in expr but are not in env/builtins/keywords.
-    """
     names = set(NAME_PATTERN.findall(expr))
     known = set(env.keys()) | set(SAFE_BUILTINS.keys()) | PY_KEYWORDS
-    # Also consider numbers and booleans literals not identifiers
-    unknown = {n for n in names if n not in known}
-    return unknown
+    return {n for n in names if n not in known}
 
 def make_placeholders(unknown: Set[str]) -> Dict[str, object]:
-    """
-    Create safe placeholders for unknown names:
-      - as values: 0
-      - as callables: lambda *a, **k: False
-    We don't know which way they'll be used, so give both by returning a callable
-    that is False-y and numeric 0 when coerced. Easiest: a small object with __bool__ and __float__.
-    """
     class _Stub:
         def __call__(self, *a, **k): return False
         def __bool__(self): return False
@@ -677,7 +706,7 @@ def compute_expected_safety_map(df_for_map: pd.DataFrame, arch_df: Optional[pd.D
     return out
 
 # ==============================
-# Planners (same as v3)
+# Planners
 # ==============================
 def greedy_plan(candidates: pd.DataFrame, pool: List[str], base_env: Dict, beam_width: int, max_steps: int, mode: str, exp_map_for_greedy: Dict[str, float]) -> Tuple[List[Dict], List[str]]:
     remaining = set(pool); chosen: List[Dict] = []
@@ -898,7 +927,7 @@ if len(filters_df) == 0:
     st.stop()
 
 # ==============================
-# Missing symbol UI
+# Missing Symbols • Aliases & Fallbacks
 # ==============================
 st.subheader("Missing Symbols • Aliases & Fallbacks")
 alias_col, fallback_col = st.columns([2,1])
@@ -915,8 +944,8 @@ alias_map = parse_alias_lines(alias_text) if alias_text else {}
 if alias_upload is not None:
     try:
         adf = pd.read_csv(alias_upload)
-        if {"name","expression"}.issubset(set(c.lower() for c in adf.columns.map(str))):
-            lc = {c.lower(): c for c in adf.columns}
+        lc = {c.lower(): c for c in adf.columns.map(str)}
+        if "name" in lc and "expression" in lc:
             for _, r in adf.iterrows():
                 nm = str(r[lc["name"]]).strip()
                 ex = str(r[lc["expression"]]).strip()
@@ -939,7 +968,6 @@ if not run:
 # ==============================
 base_env = make_base_env(seed, prev_seed, prev_prev, hot_digits, cold_digits, due_digits)
 
-# Evaluate alias RHS now (in base env)
 alias_values = build_alias_env(alias_map, base_env)
 if alias_values:
     base_env.update(alias_values)
@@ -948,7 +976,7 @@ if alias_values:
 st.info(f"Using Hot/Cold/Due everywhere → hot={hot_digits} • cold={cold_digits} • due={due_digits}", icon="🔥")
 
 # ==============================
-# Evaluation helpers (with alias + fallback)
+# Evaluation helpers (aliases + fallback)
 # ==============================
 def _missing_name_from_exc(err: Exception) -> Optional[str]:
     m = re.search(r"name '([^']+)' is not defined", str(err))
@@ -956,12 +984,10 @@ def _missing_name_from_exc(err: Exception) -> Optional[str]:
     return None
 
 def compile_with_placeholders(expr: str, env: Dict, skip_log: List[dict], fid: str, name: str, stage_prefix: str):
-    # First try compile; if NameError happens at eval later, we can patch.
     try:
         code = compile(str(expr), f"<{stage_prefix}>", "eval")
         return code, {}
     except Exception as e:
-        # Most compile errors are syntax; record and return None.
         skip_log.append({"filter_id": fid, "name": name, "stage": f"{stage_prefix}_compile", "error": str(e), "missing": _missing_name_from_exc(e)})
         return None, {}
 
@@ -977,12 +1003,10 @@ def ensure_placeholders(expr: str, env: Dict, allow_auto: bool, recorded: List[d
 def eval_expr(expr: str, env: Dict, skip_log: List[dict], fid: str, name: str, stage_prefix: str, allow_auto=True) -> Optional[bool]:
     code, _ = compile_with_placeholders(expr, env, skip_log, fid, name, stage_prefix)
     if code is None: return None
-    # Inject placeholders for still-unknown names before eval
     placeholders = ensure_placeholders(expr, env, allow_auto, skip_log, fid, name)
     try:
         return bool(eval(code, {"__builtins__": {}}, {**SAFE_BUILTINS, **env, **placeholders}))
     except Exception as e:
-        # If NameError appears here, try one more time with placeholders
         miss = _missing_name_from_exc(e)
         if miss and allow_auto:
             more = make_placeholders({miss})
@@ -996,9 +1020,7 @@ def eval_expr(expr: str, env: Dict, skip_log: List[dict], fid: str, name: str, s
 
 def eval_applicable_with_error(applicable_if: str, base_env: Dict, fid: str, name: str, skip_log: List[dict], allow_auto=True) -> bool:
     res = eval_expr(str(applicable_if), base_env, skip_log, fid, name, "applicable_if", allow_auto=allow_auto)
-    if res is None:
-        # On error we treat as applicable (don't block evaluation completely)
-        return True
+    if res is None: return True
     return bool(res)
 
 def eval_filter_on_pool_with_errors(row: pd.Series, pool: List[str], base_env: Dict, skip_log: List[dict], allow_auto=True) -> Tuple[Set[str], int, int, int]:
@@ -1160,7 +1182,7 @@ if large_df.empty:
     st.info("No candidates meet the 'Large' threshold; nothing to plan.")
     kept_after = pool; plan = []
 else:
-    candidates = large_df[["id","name","expression"]].copy()
+    candidates = large_df[["id", "name", "expression"]].copy()
     exp_map_for_greedy = {str(r["id"]): (r.get("expected_safety_pct") or 50.0)/100.0 for _, r in large_df.iterrows()}
     plan, kept_after = greedy_plan(candidates, pool, base_env, int(beam_width), int(max_steps), mode, exp_map_for_greedy)
 
