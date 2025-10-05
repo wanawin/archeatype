@@ -1,21 +1,29 @@
 # 1_Large_Filters_Planner.py
-# UI preserved. Only filter-processing logic has been upgraded to match PythonFilterTester behavior.
+# UI PRESERVED (the same sections & order you want)
+# Only the FILTER ENGINE was updated to match your PythonFilterTester behavior.
 
 from __future__ import annotations
 import io, re, math, random, unicodedata
-from typing import Dict, List, Set, Tuple, Optional
+from typing import Dict, List, Set, Tuple
 from collections import Counter
 
 import pandas as pd
 import streamlit as st
 
-# ---------------- Page ----------------
+# ──────────────────────────────────────────────────────────────────────────────
+# Page
+# ──────────────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Large Filters Planner", layout="wide")
 st.title("Large Filters Planner")
 
-# ---------------- Constants / Maps (logic only) ----------------
-# VTRAC v4
-VTRAC: Dict[int, int]  = {0:1,5:1, 1:2,6:2, 2:3,7:3, 3:4,8:4, 4:5,9:5}
+# ──────────────────────────────────────────────────────────────────────────────
+# Constants / Maps (definitions only; UI unchanged)
+# ──────────────────────────────────────────────────────────────────────────────
+# VTRAC v4 groups
+VTRAC: Dict[int, int] = {0:1,5:1, 1:2,6:2, 2:3,7:3, 3:4,8:4, 4:5,9:5}
+V_TRAC_GROUPS = VTRAC  # legacy alias some CSVs use
+
+# Mirror pairs (standard)
 MIRROR: Dict[int, int] = {0:5,5:0,1:6,6:1,2:7,7:2,3:8,8:3,4:9,9:4}
 
 SAFE_BUILTINS = {
@@ -27,7 +35,9 @@ SAFE_BUILTINS = {
     "True": True, "False": False, "None": None,
 }
 
-# ---------------- Small helpers ----------------
+# ──────────────────────────────────────────────────────────────────────────────
+# Small helpers (used in expressions)
+# ──────────────────────────────────────────────────────────────────────────────
 def parse_list_any(text: str) -> List[str]:
     if not text: return []
     raw = text.replace("\t", ",").replace("\n", ",").replace(";", ",").replace(" ", ",")
@@ -37,9 +47,13 @@ def digits_of(s: str) -> List[int]:
     s = str(s).strip()
     return [int(ch) for ch in s if ch.isdigit()]
 
-def safe_digits(x): 
-    try: return [int(ch) for ch in str(x) if ch.isdigit()]
-    except Exception: return []
+def safe_digits(x):
+    try:
+        return [int(ch) for ch in str(x) if ch.isdigit()]
+    except Exception:
+        return []
+
+def digit_sum(x): return sum(safe_digits(x))
 
 def classify_structure(digs: List[int]) -> str:
     c = Counter(digs); counts = sorted(c.values(), reverse=True)
@@ -59,19 +73,24 @@ def low_count(x):  return sum(1 for d in safe_digits(x) if d <= 4)
 def first_digit(x): ds = safe_digits(x); return ds[0] if ds else None
 def last_digit(x):  ds = safe_digits(x); return ds[-1] if ds else None
 def last_two_digits(x): ds = safe_digits(x); return ds[-2:] if len(ds) >= 2 else ds
-def digit_sum(x): return sum(safe_digits(x))
-def digit_span(x):  ds = safe_digits(x); return (max(ds) - min(ds)) if ds else 0
-def has_triplet(x): c=Counter(safe_digits(x)); return max(c.values()) if c else 0 >= 3
 
-def vtrac_of(d): 
-    try: d=int(d); return VTRAC.get(d)
+def digit_span(x):
+    ds = safe_digits(x)
+    return (max(ds) - min(ds)) if ds else 0
+
+def has_triplet(x):
+    c = Counter(safe_digits(x))
+    return (max(c.values()) if c else 0) >= 3
+
+def vtrac_of(d):
+    try: d = int(d); return VTRAC.get(d)
     except Exception: return None
 
 def contains_mirror_pair(x):
     s = set(safe_digits(x))
-    return any((d in s and MIRROR[d] in s and MIRROR[d] != d) for d in s)
+    return any((d in s and MIRROR.get(d) in s and MIRROR[d] != d) for d in s)
 
-# --------- H/C/D helpers bound to UI values ----------
+# ── H/C/D helpers that are bound to UI values
 def _mk_is_hot(env):  return lambda d: (str(d).isdigit() and int(d) in env.get("hot_set", set()))
 def _mk_is_cold(env): return lambda d: (str(d).isdigit() and int(d) in env.get("cold_set", set()))
 def _mk_is_due(env):  return lambda d: (str(d).isdigit() and int(d) in env.get("due_set", set()))
@@ -88,7 +107,9 @@ def count_in_due(x, due_set=None):
     ds = due_set if due_set is not None else set(st.session_state.get("due_digits", []))
     return sum(1 for d in safe_digits(x) if d in ds)
 
-# --------- Expression normalization (tester-style) ----------
+# ──────────────────────────────────────────────────────────────────────────────
+# Expression normalization (spelling/term variations like PythonFilterTester)
+# ──────────────────────────────────────────────────────────────────────────────
 _CAMEL_RE = re.compile(r'(?<!^)(?=[A-Z])')
 def _camel_to_snake(s: str) -> str: return _CAMEL_RE.sub('_', s).lower()
 def _ascii(s: str) -> str:
@@ -105,55 +126,73 @@ def _wb_replace(text: str, mapping: Dict[str, str]) -> str:
         text = re.sub(rf"\b{k}\b", v)
     return text
 
-# Spelling/term variations taken from the tester app behavior
+# Wide alias map to swallow the tester’s variations (IDs often rely on these)
 _VARIATION_MAP: Dict[str, str] = {
-    # H/C/D
+    # Hot / Cold / Due
     "hotDigits":"hot_digits", "hotdigits":"hot_digits", "hotnumbers":"hot_digits", "hot":"hot_digits",
     "coldDigits":"cold_digits", "colddigits":"cold_digits", "coldnumbers":"cold_digits", "cold":"cold_digits",
     "dueDigits":"due_digits", "duedigits":"due_digits", "duenumbers":"due_digits", "due":"due_digits",
-    "percentHot":"count_in_hot(combo_digits, hot_set)",   # % terms mapped to counts for compatibility
+    "percentHot":"count_in_hot(combo_digits, hot_set)",
     "percentCold":"count_in_cold(combo_digits, cold_set)",
     "percentDue":"count_in_due(combo_digits, due_set)",
     "countHot":"sum(1 for d in combo_digits if d in hot_set)",
     "countCold":"sum(1 for d in combo_digits if d in cold_set)",
     "countDue":"sum(1 for d in combo_digits if d in due_set)",
-    # mirror
-    "mirrorDigits":"combo_mirror_digits","mirrordigits":"combo_mirror_digits","mirrors":"combo_mirror_digits",
-    "mirrorSet":"set(combo_mirror_digits)","mirrorset":"set(combo_mirror_digits)",
-    "mirrorPairs":"contains_mirror_pair(combo_digits)","hasMirrorPair":"contains_mirror_pair(combo_digits)",
-    # combo/seed
-    "comboDigits":"combo_digits","combodigits":"combo_digits",
-    "comboSet":"set(combo_digits)","comboset":"set(combo_digits)",
-    "seedDigits":"seed_digits","seeddigits":"seed_digits",
-    "seedSet":"set(seed_digits)","seedset":"set(seed_digits)",
-    # parity & counts
-    "parityEven":"combo_sum_is_even", "isEven":"combo_sum_is_even", "isOdd":"not combo_sum_is_even",
+
+    # Mirror
+    "mirrorDigits":"combo_mirror_digits", "mirrordigits":"combo_mirror_digits", "mirrors":"combo_mirror_digits",
+    "mirrorSet":"set(combo_mirror_digits)", "mirrorset":"set(combo_mirror_digits)",
+    "mirrorPairs":"contains_mirror_pair(combo_digits)", "hasMirrorPair":"contains_mirror_pair(combo_digits)",
+    "hasmirrorpair":"contains_mirror_pair(combo_digits)", "hasmirror":"contains_mirror_pair(combo_digits)",
+
+    # Combo / Seed tokens
+    "comboDigits":"combo_digits", "combodigits":"combo_digits",
+    "comboSet":"set(combo_digits)", "comboset":"set(combo_digits)",
+    "seedDigits":"seed_digits", "seeddigits":"seed_digits",
+    "seedSet":"set(seed_digits)", "seedset":"set(seed_digits)",
+
+    # Parity / counts
+    "parityEven":"combo_sum_is_even", "parityeven":"combo_sum_is_even",
+    "isEven":"combo_sum_is_even", "iseven":"combo_sum_is_even",
+    "isOdd":"not combo_sum_is_even", "isodd":"not combo_sum_is_even",
     "evenCount":"even_count(combo_digits)", "oddCount":"odd_count(combo_digits)",
     "highCount":"high_count(combo_digits)", "lowCount":"low_count(combo_digits)",
-    # positional
-    "firstDigit":"first_digit(combo_digits)", "lastDigit":"last_digit(combo_digits)",
-    "lastTwo":"last_two_digits(combo_digits)", "last2":"last_two_digits(combo_digits)",
-    # sums/structure
-    "sumDigits":"digit_sum(combo_digits)","digitSum":"digit_sum(combo_digits)","sum":"digit_sum(combo_digits)",
-    "structure":"combo_structure",
-    # vtrac
-    "vtrack":"VTRAC","vtracks":"VTRAC","vtracGroups":"VTRAC",
-    "vtracSet":"combo_vtracs","vtracLast":"combo_last_vtrac","lastVtrac":"combo_last_vtrac",
+    "isAllHigh":"all(d >= 5 for d in combo_digits)", "isallhigh":"all(d >= 5 for d in combo_digits)",
+    "isAllLow":"all(d <= 4 for d in combo_digits)", "isalllow":"all(d <= 4 for d in combo_digits)",
+
+    # Positional
+    "firstDigit":"first_digit(combo_digits)", "firstdigit":"first_digit(combo_digits)",
+    "lastDigit":"last_digit(combo_digits)", "lastdigit":"last_digit(combo_digits)",
+    "lastTwo":"last_two_digits(combo_digits)", "lasttwo":"last_two_digits(combo_digits)", "last2":"last_two_digits(combo_digits)",
+
+    # Sums / structure
+    "sumDigits":"digit_sum(combo_digits)", "sumdigits":"digit_sum(combo_digits)",
+    "digitSum":"digit_sum(combo_digits)", "digitsum":"digit_sum(combo_digits)",
+    "comboSum":"digit_sum(combo_digits)", "sum":"digit_sum(combo_digits)",
+    "structure":"combo_structure", "struct":"combo_structure",
+
+    # VTRAC
+    "vtrack":"VTRAC", "vtracks":"VTRAC", "vtracGroups":"VTRAC", "vtracgroups":"VTRAC",
+    "vtracSet":"combo_vtracs", "vtracset":"combo_vtracs",
+    "comboVtracs":"combo_vtracs", "combovtracs":"combo_vtracs",
+    "vtracLast":"combo_last_vtrac", "vtraclast":"combo_last_vtrac",
+    "lastVtrac":"combo_last_vtrac", "lastvtrac":"combo_last_vtrac",
 }
 
 def normalize_expr(expr: str) -> str:
     if not expr: return ""
     x = _ascii(expr)
-    # convert camelCase tokens we know about
+    # camelCase tokens → snake_case
     for t in ["hotDigits","coldDigits","dueDigits","mirrorPairs","mirrorDigits",
-              "seedDigits","comboDigits","evenCount","oddCount","highCount","lowCount",
+              "seedDigits","comboDigits","percentHot","percentCold","percentDue",
+              "evenCount","oddCount","highCount","lowCount",
               "firstDigit","lastDigit","lastTwo","last2",
               "digitSum","sumDigits","vtracSet","vtracLast","vtracGroups",
-              "comboSet","seedSet","isEven","isOdd","parityEven"]:
+              "comboSum","comboSet","seedSet","isEven","isOdd","parityEven","structure"]:
         if t in x: x = x.replace(t, _camel_to_snake(t))
-    # word-boundary replacements
+    # word-boundary alias replacement
     x = _wb_replace(x, _VARIATION_MAP)
-    # normalize strict operators the tester never uses
+    # normalize strict operators (tester never uses !==)
     x = x.replace("!==", "!=")
     return x
 
@@ -161,8 +200,16 @@ def _clean_expr(s: str) -> str:
     s = str(s or "").strip().strip('"').strip("'")
     return normalize_expr(s)
 
-# ---------------- CSV loaders (unchanged UI expectations) ----------------
-@st.cache_data(show_spinner=False)
+# ──────────────────────────────────────────────────────────────────────────────
+# CSV loading (unchanged UX)
+# ──────────────────────────────────────────────────────────────────────────────
+def _pick_col(df: pd.DataFrame, hint: str) -> pd.Series:
+    cols_lower = {c.lower(): c for c in df.columns}
+    if hint and hint in df.columns: return df[hint]
+    if "result" in cols_lower:      return df[cols_lower["result"]]
+    if "combo" in cols_lower:       return df[cols_lower["combo"]]
+    return df[df.columns[0]]
+
 def load_pool_from_text_or_csv(text: str, col_hint: str) -> List[str]:
     text = text.strip()
     if not text: return []
@@ -170,11 +217,7 @@ def load_pool_from_text_or_csv(text: str, col_hint: str) -> List[str]:
     if looks_csv:
         try:
             df = pd.read_csv(io.StringIO(text), engine="python")
-            cols_lower = {c.lower(): c for c in df.columns}
-            if col_hint and col_hint in df.columns: s = df[col_hint]
-            elif "result" in cols_lower:            s = df[cols_lower["result"]]
-            elif "combo" in cols_lower:             s = df[cols_lower["combo"]]
-            else:                                    s = df[df.columns[0]]
+            s = _pick_col(df, col_hint)
             return [str(x).strip() for x in s.dropna().astype(str)]
         except Exception:
             pass
@@ -182,41 +225,22 @@ def load_pool_from_text_or_csv(text: str, col_hint: str) -> List[str]:
 
 def load_pool_from_file(f, col_hint: str) -> List[str]:
     df = pd.read_csv(f, engine="python")
-    cols_lower = {c.lower(): c for c in df.columns}
-    if col_hint and col_hint in df.columns: s = df[col_hint]
-    elif "result" in cols_lower:            s = df[cols_lower["result"]]
-    elif "combo" in cols_lower:             s = df[cols_lower["combo"]]
-    else:                                    s = df[df.columns[0]]
+    s = _pick_col(df, col_hint)
     return [str(x).strip() for x in s.dropna().astype(str)]
-
-@st.cache_data(show_spinner=False)
-def load_filters_from_source(pasted_csv_text: str, uploaded_csv_file, csv_path: str) -> pd.DataFrame:
-    if pasted_csv_text and pasted_csv_text.strip():
-        df = pd.read_csv(io.StringIO(pasted_csv_text), engine="python")
-        return normalize_filters_df(df)
-    if uploaded_csv_file is not None:
-        df = pd.read_csv(uploaded_csv_file, engine="python")
-        return normalize_filters_df(df)
-    df = pd.read_csv(csv_path, engine="python")
-    return normalize_filters_df(df)
 
 def normalize_filters_df(df: pd.DataFrame) -> pd.DataFrame:
     out = pd.DataFrame([{k.lower(): v for k, v in row.items()} for row in df.to_dict(orient="records")])
-    if "id" not in out.columns and "fid" in out.columns:
-        out["id"] = out["fid"]
-    if "id" not in out.columns:
-        out["id"] = range(1, len(out) + 1)
+    if "id" not in out.columns and "fid" in out.columns: out["id"] = out["fid"]
+    if "id" not in out.columns: out["id"] = range(1, len(out) + 1)
     if "expression" not in out.columns:
         raise ValueError("Filters CSV must include an 'expression' column.")
     out["expression"] = out["expression"].map(_clean_expr)
-    if "name" not in out.columns:
-        out["name"] = out["id"].astype(str)
+    if "name" not in out.columns: out["name"] = out["id"].astype(str)
     if "applicable_if" not in out.columns or out["applicable_if"].isna().all():
         out["applicable_if"] = "True"
     else:
         out["applicable_if"] = out["applicable_if"].map(_clean_expr)
-    if "enabled" not in out.columns:
-        out["enabled"] = True
+    if "enabled" not in out.columns: out["enabled"] = True
 
     rows = []
     for _, r in out.iterrows():
@@ -232,25 +256,52 @@ def normalize_filters_df(df: pd.DataFrame) -> pd.DataFrame:
     out = out[out["enabled"].astype(str).str.lower().isin(("1","true","t","yes","y"))].copy()
     return out
 
-# ---------------- Environments (bound to UI) ----------------
+def load_filters_from_source(pasted_csv_text: str, uploaded_csv_file, csv_path: str) -> pd.DataFrame:
+    if pasted_csv_text and pasted_csv_text.strip():
+        df = pd.read_csv(io.StringIO(pasted_csv_text), engine="python")
+        return normalize_filters_df(df)
+    if uploaded_csv_file is not None:
+        df = pd.read_csv(uploaded_csv_file, engine="python")
+        return normalize_filters_df(df)
+    df = pd.read_csv(csv_path, engine="python")
+    return normalize_filters_df(df)
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Environments (bound to UI)
+# ──────────────────────────────────────────────────────────────────────────────
 def make_base_env(seed: str, prev_seed: str, prev_prev_seed: str, prev_prev_prev_seed: str,
                   hot_digits: List[int], cold_digits: List[int], due_digits: List[int]) -> Dict:
     env = {
+        # seeds (4 back)
         "seed_digits": digits_of(seed) if seed else [],
         "prev_seed_digits": digits_of(prev_seed) if prev_seed else [],
         "prev_prev_seed_digits": digits_of(prev_prev_seed) if prev_prev_seed else [],
         "prev_prev_prev_seed_digits": digits_of(prev_prev_prev_seed) if prev_prev_prev_seed else [],
-        "VTRAC": VTRAC, "MIRROR": MIRROR, "mirror": MIRROR,
-        "hot_digits": sorted(set(hot_digits)), "cold_digits": sorted(set(cold_digits)), "due_digits": sorted(set(due_digits)),
+
+        # reference maps
+        "VTRAC": VTRAC, "V_TRAC_GROUPS": V_TRAC_GROUPS,
+        "MIRROR": MIRROR, "mirror": MIRROR,
+
+        # H/C/D from UI
+        "hot_digits": sorted(set(hot_digits)),
+        "cold_digits": sorted(set(cold_digits)),
+        "due_digits":  sorted(set(due_digits)),
         "hot_set": set(hot_digits), "cold_set": set(cold_digits), "due_set": set(due_digits),
-        "safe_digits": safe_digits, "digits_of": digits_of, "digit_sum": digit_sum, "digit_span": digit_span,
-        "classify_structure": classify_structure, "contains_mirror_pair": contains_mirror_pair, "vtrac_of": vtrac_of,
+
+        # helpers
+        "digits_of": digits_of, "safe_digits": safe_digits, "digit_sum": digit_sum,
         "even_count": even_count, "odd_count": odd_count, "high_count": high_count, "low_count": low_count,
         "first_digit": first_digit, "last_digit": last_digit, "last_two_digits": last_two_digits,
-        "has_triplet": has_triplet, **SAFE_BUILTINS,
-        # placeholders populated per-combo
-        "combo": "", "combo_digits": [], "combo_set": set(), "combo_sum": 0,
-        "combo_sum_is_even": False, "combo_last_digit": None, "combo_structure": "single",
+        "digit_span": digit_span, "classify_structure": classify_structure, "has_triplet": has_triplet,
+        "contains_mirror_pair": contains_mirror_pair, "vtrac_of": vtrac_of,
+
+        # builtins (safe)
+        **SAFE_BUILTINS,
+
+        # populated per combo
+        "combo": "", "combo_digits": [], "combo_set": set(),
+        "combo_sum": 0, "combo_sum_is_even": False,
+        "combo_last_digit": None, "combo_structure": "single",
     }
     env["is_hot"]  = _mk_is_hot(env)
     env["is_cold"] = _mk_is_cold(env)
@@ -272,17 +323,21 @@ def combo_env(base_env: Dict, combo: str) -> Dict:
         "combo_vtracs": set(VTRAC[d] for d in cd) if cd else set(),
         "combo_last_vtrac": (VTRAC[cd[-1]] if cd else None),
     })
+    # rebind lambdas to ensure they see the updated sets
     env["is_hot"]  = _mk_is_hot(env)
     env["is_cold"] = _mk_is_cold(env)
     env["is_due"]  = _mk_is_due(env)
     return env
 
-# ---------------- Evaluators ----------------
+# ──────────────────────────────────────────────────────────────────────────────
+# Evaluators (tester-style: compile once, skip on error)
+# ──────────────────────────────────────────────────────────────────────────────
 def eval_applicable(row: pd.Series, base_env: Dict) -> bool:
     try:
         return bool(eval(row["applicable_code"], {"__builtins__": {}}, base_env))
     except Exception:
-        return True  # permissive like the tester
+        # permissive, like your tester — if guard fails to eval, treat as applicable
+        return True
 
 def eval_filter_on_pool(row: pd.Series, pool: List[str], base_env: Dict) -> Tuple[Set[str], int]:
     eliminated: Set[str] = set()
@@ -293,18 +348,21 @@ def eval_filter_on_pool(row: pd.Series, pool: List[str], base_env: Dict) -> Tupl
             if bool(eval(code, {"__builtins__": {}}, env)):
                 eliminated.add(c)
         except Exception:
-            # match tester behavior: skip on error, don't crash the batch
+            # skip errors silently (to match the tester app behavior)
             pass
     return eliminated, len(eliminated)
 
-# --------------------------- UI (unchanged layout) ---------------------------
+# ──────────────────────────────────────────────────────────────────────────────
+# UI — PRESERVED (sections & order)
+# ──────────────────────────────────────────────────────────────────────────────
 
-# (A) Hot / Cold / Due (manual)
+# (A) Hot / Cold / Due (optional)
 st.subheader("Hot / Cold / Due digits (optional)")
 cc1, cc2, cc3 = st.columns(3)
 hot_digits  = [int(x) for x in parse_list_any(cc1.text_input("Hot digits (comma-separated)")) if x.isdigit()]
 cold_digits = [int(x) for x in parse_list_any(cc2.text_input("Cold digits (comma-separated)")) if x.isdigit()]
 due_digits  = [int(x) for x in parse_list_any(cc3.text_input("Due digits (comma-separated)")) if x.isdigit()]
+# keep in session so count_* helpers can read when not passed explicitly
 st.session_state["hot_digits"] = hot_digits
 st.session_state["cold_digits"] = cold_digits
 st.session_state["due_digits"]  = due_digits
@@ -326,13 +384,13 @@ except Exception as e:
 
 st.caption(f"Pool size: {len(pool)}")
 
-# (C) Draw History (4 back) — always visible (UI preserved)
+# (C) Draw History (4 back) — ALWAYS visible
 st.subheader("Draw History (4 back)")
 s1, s2, s3, s4 = st.columns(4)
-seed      = s1.text_input("Known winner (0-back)", value="")
-prev_seed = s2.text_input("Draw 1-back", value="")
-prev_prev = s3.text_input("Draw 2-back", value="")
-prev_prev_prev = s4.text_input("Draw 3-back", value="")
+seed            = s1.text_input("Known winner (0-back)", value="")
+prev_seed       = s2.text_input("Draw 1-back", value="")
+prev_prev       = s3.text_input("Draw 2-back", value="")
+prev_prev_prev  = s4.text_input("Draw 3-back", value="")
 
 # (D) Filters
 st.subheader("Filters")
@@ -347,7 +405,7 @@ except Exception as e:
     st.error(f"Failed to load Filters CSV ➜ {e}")
     filters_df_full = pd.DataFrame(columns=["id","name","expression","enabled","applicable_if"])
 
-# Optional restriction by IDs or names
+# Optional: restrict to a provided list of IDs (or names)
 applicable_ids = set(parse_list_any(fids_text))
 if applicable_ids and len(filters_df_full):
     id_str   = filters_df_full["id"].astype(str)
