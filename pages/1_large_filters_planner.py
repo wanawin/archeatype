@@ -1,22 +1,21 @@
 # 1_Large_Filters_Planner.py
-# UI is always visible at startup; only the filter engine was upgraded.
-# Run button requires only a pool; filters are optional.
+# UI: matches screenshot (sidebar with Mode/Greedy/etc). Center pane unchanged.
+# Logic: PythonFilterTester-style evaluator (aliases, mirror, VTRAC, H/C/D binding, compile-once, skip-on-error).
 
 from __future__ import annotations
-import io, re, math, random, unicodedata
+import io, re, math, random, unicodedata, os
 from typing import Dict, List, Set, Tuple
 from collections import Counter
 
 import pandas as pd
 import streamlit as st
 
-# ───── Page ─────
+# ───────── Page ─────────
 st.set_page_config(page_title="Large Filters Planner", layout="wide")
-st.title("Large Filters Planner")
+st.title("Large Filters Planner — Unified (Richer Sidebar)")
 
-# ───── Definitions (logic only) ─────
+# ───────── Definitions / Maps (logic only) ─────────
 VTRAC: Dict[int, int] = {0:1,5:1, 1:2,6:2, 2:3,7:3, 3:4,8:4, 4:5,9:5}
-V_TRAC_GROUPS = VTRAC
 MIRROR: Dict[int, int] = {0:5,5:0,1:6,6:1,2:7,7:2,3:8,8:3,4:9,9:4}
 
 SAFE_BUILTINS = {
@@ -28,7 +27,7 @@ SAFE_BUILTINS = {
     "True": True, "False": False, "None": None,
 }
 
-# ───── Helpers used by expressions ─────
+# ───────── Helpers used by expressions ─────────
 def parse_list_any(text: str) -> List[str]:
     if not text: return []
     raw = text.replace("\t", ",").replace("\n", ",").replace(";", ",").replace(" ", ",")
@@ -43,6 +42,9 @@ def safe_digits(x):
     except Exception: return []
 
 def digit_sum(x): return sum(safe_digits(x))
+def digit_span(x): 
+    ds = safe_digits(x); 
+    return (max(ds) - min(ds)) if ds else 0
 
 def classify_structure(digs: List[int]) -> str:
     c = Counter(digs); counts = sorted(c.values(), reverse=True)
@@ -62,7 +64,6 @@ def low_count(x):  return sum(1 for d in safe_digits(x) if d <= 4)
 def first_digit(x): ds = safe_digits(x); return ds[0] if ds else None
 def last_digit(x):  ds = safe_digits(x); return ds[-1] if ds else None
 def last_two_digits(x): ds = safe_digits(x); return ds[-2:] if len(ds) >= 2 else ds
-def digit_span(x): ds = safe_digits(x); return (max(ds) - min(ds)) if ds else 0
 def has_triplet(x): c = Counter(safe_digits(x)); return (max(c.values()) if c else 0) >= 3
 
 def vtrac_of(d):
@@ -90,7 +91,7 @@ def count_in_due(x, due_set=None):
     ds = due_set if due_set is not None else set(st.session_state.get("due_digits", []))
     return sum(1 for d in safe_digits(x) if d in ds)
 
-# ───── Expression normalization (tester-style) ─────
+# ───────── Expression normalization (tester-style) ─────────
 _CAMEL_RE = re.compile(r'(?<!^)(?=[A-Z])')
 def _camel_to_snake(s: str) -> str: return _CAMEL_RE.sub('_', s).lower()
 def _ascii(s: str) -> str:
@@ -144,7 +145,7 @@ _VARIATION_MAP: Dict[str, str] = {
     "comboSum":"digit_sum(combo_digits)","sum":"digit_sum(combo_digits)",
     "structure":"combo_structure",
 
-    # vtrac
+    # vtrac (v4)
     "vtrack":"VTRAC","vtracks":"VTRAC","vtracGroups":"VTRAC",
     "vtracSet":"combo_vtracs","vtracLast":"combo_last_vtrac","lastVtrac":"combo_last_vtrac",
 }
@@ -167,7 +168,7 @@ def _clean_expr(s: str) -> str:
     s = str(s or "").strip().strip('"').strip("'")
     return normalize_expr(s)
 
-# ───── CSV loaders (UX unchanged) ─────
+# ───────── CSV loaders ─────────
 def _pick_col(df: pd.DataFrame, hint: str) -> pd.Series:
     cols_lower = {c.lower(): c for c in df.columns}
     if hint and hint in df.columns: return df[hint]
@@ -230,7 +231,7 @@ def load_filters_from_source(pasted_csv_text: str, uploaded_csv_file, csv_path: 
     df = pd.read_csv(csv_path, engine="python")
     return normalize_filters_df(df)
 
-# ───── Environments ─────
+# ───────── Environments ─────────
 def make_base_env(seed: str, prev_seed: str, prev_prev_seed: str, prev_prev_prev_seed: str,
                   hot_digits: List[int], cold_digits: List[int], due_digits: List[int]) -> Dict:
     env = {
@@ -238,16 +239,18 @@ def make_base_env(seed: str, prev_seed: str, prev_prev_seed: str, prev_prev_prev
         "prev_seed_digits": digits_of(prev_seed) if prev_seed else [],
         "prev_prev_seed_digits": digits_of(prev_prev_seed) if prev_prev_seed else [],
         "prev_prev_prev_seed_digits": digits_of(prev_prev_prev_seed) if prev_prev_prev_seed else [],
-        "VTRAC": VTRAC, "V_TRAC_GROUPS": V_TRAC_GROUPS,
-        "MIRROR": MIRROR, "mirror": MIRROR,
+        "VTRAC": VTRAC, "MIRROR": MIRROR, "mirror": MIRROR,
         "hot_digits": sorted(set(hot_digits)), "cold_digits": sorted(set(cold_digits)), "due_digits": sorted(set(due_digits)),
         "hot_set": set(hot_digits), "cold_set": set(cold_digits), "due_set": set(due_digits),
+
         "digits_of": digits_of, "safe_digits": safe_digits, "digit_sum": digit_sum,
         "even_count": even_count, "odd_count": odd_count, "high_count": high_count, "low_count": low_count,
         "first_digit": first_digit, "last_digit": last_digit, "last_two_digits": last_two_digits,
         "digit_span": digit_span, "classify_structure": classify_structure, "has_triplet": has_triplet,
         "contains_mirror_pair": contains_mirror_pair, "vtrac_of": vtrac_of,
+
         **SAFE_BUILTINS,
+
         "combo": "", "combo_digits": [], "combo_set": set(),
         "combo_sum": 0, "combo_sum_is_even": False,
         "combo_last_digit": None, "combo_structure": "single",
@@ -277,7 +280,7 @@ def combo_env(base_env: Dict, combo: str) -> Dict:
     env["is_due"]  = _mk_is_due(env)
     return env
 
-# ───── Evaluators (tester-style) ─────
+# ───────── Evaluators (tester-style) ─────────
 def eval_applicable(row: pd.Series, base_env: Dict) -> bool:
     try:
         return bool(eval(row["applicable_code"], {"__builtins__": {}}, base_env))
@@ -293,10 +296,27 @@ def eval_filter_on_pool(row: pd.Series, pool: List[str], base_env: Dict) -> Tupl
             if bool(eval(code, {"__builtins__": {}}, env)):
                 eliminated.add(c)
         except Exception:
+            # skip on error (match PythonFilterTester behavior)
             pass
     return eliminated, len(eliminated)
 
-# ───── UI (unchanged, always visible) ─────
+# ───────── Sidebar — matches your screenshot ─────────
+st.sidebar.subheader("Mode")
+mode = st.sidebar.radio("",
+    options=["Playlist Reducer", "Safe Filter Explorer"],
+    index=1, label_visibility="collapsed")
+
+min_large = int(st.sidebar.number_input("Min eliminations to call it 'Large'", 1, 1000, 60))
+greedy_beam = int(st.sidebar.number_input("Greedy beam width", 1, 50, 6))
+greedy_steps = int(st.sidebar.number_input("Greedy max steps", 1, 200, 18))
+exclude_parity_wipers = st.sidebar.checkbox("Exclude parity-wipers", value=True)
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("Archetype Lifts (optional)")
+use_archetype_lift = st.sidebar.checkbox("Use archetype-lift CSV if present", value=True)
+arch_path = st.sidebar.text_input("Archetype-lifts CSV path", value="archetype_filter_dimension.csv")
+
+# ───────── Center UI (always visible) ─────────
 
 # (A) Hot / Cold / Due (optional)
 st.subheader("Hot / Cold / Due digits (optional)")
@@ -345,6 +365,7 @@ except Exception as e:
     st.error(f"Failed to load Filters CSV ➜ {e}")
     filters_df_full = pd.DataFrame(columns=["id","name","expression","enabled","applicable_if"])
 
+# Restrict to provided IDs/names if supplied
 applicable_ids = set(parse_list_any(fids_text))
 if applicable_ids and len(filters_df_full):
     id_str   = filters_df_full["id"].astype(str)
@@ -354,13 +375,25 @@ if applicable_ids and len(filters_df_full):
 else:
     filters_df = filters_df_full.copy()
 
+# Optional “exclude parity-wipers” — crude heuristic by name/expr keywords
+if exclude_parity_wipers and len(filters_df):
+    kw = ["parity-wiper", "parity wiper", "wipe parity"]
+    mask = ~(
+        filters_df.get("name","").astype(str).str.lower().str.contains("|".join(kw))
+        | filters_df["expression"].astype(str).str.lower().str.contains("|".join(kw))
+    )
+    filters_df = filters_df[mask].copy()
+
 st.caption(f"Filters loaded: {len(filters_df)}")
 
-# (E) Run — only requires a pool now; filters can wait
-run = st.button("▶ Run Planner", type="primary", disabled=(len(pool)==0))
+# (E) Run — only requires a pool; filters optional
+run = st.button("▶ Run Planner + Recommender", type="primary", disabled=(len(pool)==0))
 
 if run:
-    base_env = make_base_env(seed, prev_seed, prev_prev, prev_prev_prev, hot_digits, cold_digits, due_digits)
+    base_env = make_base_env(seed, prev_seed, prev_prev, prev_prev_prev,
+                             st.session_state.get("hot_digits", []),
+                             st.session_state.get("cold_digits", []),
+                             st.session_state.get("due_digits", []))
     pool_list = list(pool)
 
     if len(filters_df) == 0:
@@ -370,18 +403,41 @@ if run:
         for _, r in filters_df.iterrows():
             if not eval_applicable(r, base_env):
                 continue
-            elim, cnt = eval_filter_on_pool(r, pool_list, base_env)
+            eliminated, cnt = eval_filter_on_pool(r, pool_list, base_env)
             rows.append({
                 "id": r["id"],
                 "name": r.get("name",""),
                 "expression": r["expression"],
                 "eliminated_now": cnt
             })
+
         if rows:
             out = pd.DataFrame(rows).sort_values("eliminated_now", ascending=False)
+            # baseline expected safety
+            pool_n = max(1, len(pool_list))
+            out["expected_safety_%"] = (1.0 - out["eliminated_now"] / pool_n) * 100.0
+
+            # Optional: merge archetype lift if present
+            if use_archetype_lift and arch_path and os.path.exists(arch_path):
+                try:
+                    lift_df = pd.read_csv(arch_path, engine="python")
+                    # accept common column names
+                    fid_col = "id" if "id" in lift_df.columns else ("filter_id" if "filter_id" in lift_df.columns else None)
+                    lift_col = "lift" if "lift" in lift_df.columns else ("safety_lift" if "safety_lift" in lift_df.columns else None)
+                    if fid_col and lift_col:
+                        lift_df = lift_df[[fid_col, lift_col]].rename(columns={fid_col:"id", lift_col:"lift"})
+                        out = out.merge(lift_df, how="left", on="id")
+                        out["expected_safety_lifted_%"] = (out["expected_safety_%"] * (out["lift"].fillna(1.0)))
+                except Exception as e:
+                    st.warning(f"Archetype lift merge skipped: {e}")
+
             st.subheader("Filter Diagnostics")
             st.dataframe(out, use_container_width=True)
-            st.subheader("Large filters on current pool")
-            st.dataframe(out[out["eliminated_now"]>0], use_container_width=True)
+
+            # “Large filters only” per sidebar threshold
+            large_only = out[out["eliminated_now"] >= min_large]
+            st.subheader("Best-case plan — Large filters only")
+            st.dataframe(large_only, use_container_width=True)
+
         else:
             st.info("No filters evaluated / nothing eliminated.")
