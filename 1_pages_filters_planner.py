@@ -1,32 +1,36 @@
-
-# 1_large_filters_planner_UNIFIED_SIDEBAR.py
+# 1_large_filters_planner_UNIFIED_SIDEBAR_MODEFIX.py
 # Full Streamlit app — unified build with:
-#  • Original planner UI
-#  • Richer sidebar (superset of prior controls)
-#  • 4-draws-back inputs
-#  • Tester-style spelling variations normalization
+#  • Original planner UI + richer sidebar
+#  • 4-draws-back inputs (seed, prev_seed, prev_prev, prev_prev_prev)
+#  • Tester-style spelling-variation normalization (matches python filter tester behavior)
 #  • Compile-once evaluation model
-#  • H/C/D, Mirror, VTRAC v4 wired directly from UI
+#  • Hot/Cold/Due, Mirror, VTRAC v4 wired to UI
+#  • Mode switch actually affects behavior:
+#       - Playlist Reducer: greedy reduction with early stop & max-filters cap
+#       - Safe Filter Explorer: computes Safety% against history window and recommends large-but-safe filters
 #
-# Run: streamlit run 1_large_filters_planner_UNIFIED_SIDEBAR.py
+# Run: streamlit run 1_large_filters_planner_UNIFIED_SIDEBAR_MODEFIX.py
 
 from __future__ import annotations
 import io, re, math, random, unicodedata
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Set, Tuple, Optional
 from collections import Counter
 
 import pandas as pd
 import streamlit as st
 
 # ---------------- Page ----------------
-st.set_page_config(page_title="Large Filters Planner — Unified (Richer Sidebar)", layout="wide")
-st.title("Large Filters Planner — Unified (Richer Sidebar)")
+st.set_page_config(page_title="Large Filters Planner — Unified (Mode Fix)", layout="wide")
+st.title("Large Filters Planner — Unified (Mode Fix)")
 
 # ---------------- Constants / Maps ----------------
+# VTRAC v4
 VTRAC: Dict[int, int]  = {0:1,5:1, 1:2,6:2, 2:3,7:3, 3:4,8:4, 4:5,9:5}
-V_TRAC_GROUPS: Dict[int, int] = VTRAC
+V_TRAC_GROUPS: Dict[int, int] = VTRAC  # legacy alias for some CSVs
+
+# Mirror pairs
 MIRROR: Dict[int, int] = {0:5,5:0,1:6,6:1,2:7,7:2,3:8,8:3,4:9,9:4}
-mirror = MIRROR
+mirror = MIRROR  # alias; some CSVs use lowercase
 
 SAFE_BUILTINS = {
     "abs": abs, "int": int, "str": str, "float": float, "round": round,
@@ -80,6 +84,7 @@ def spread_band(spread: int) -> str:
     if spread <= 9: return "8–9"
     return "10+"
 
+# H/C/D helpers
 def _mk_is_hot(env):  return lambda d: (str(d).isdigit() and int(d) in env.get("hot_set", set()))
 def _mk_is_cold(env): return lambda d: (str(d).isdigit() and int(d) in env.get("cold_set", set()))
 def _mk_is_due(env):  return lambda d: (str(d).isdigit() and int(d) in env.get("due_set", set()))
@@ -146,10 +151,11 @@ def _wb_replace(text: str, mapping: Dict[str, str]) -> str:
     if not mapping: return text
     items = sorted(mapping.items(), key=lambda kv: len(kv[0]), reverse=True)
     for k, v in items:
-        text = re.sub(rf"\b{k}\b", v, text)
+        text = re.sub(rf"\b{k}\b", v)
     return text
 
 _VARIATION_MAP: Dict[str, str] = {
+    # hot/cold/due
     "hotDigits": "hot_digits", "hotdigits": "hot_digits", "hotnumbers": "hot_digits", "hot": "hot_digits",
     "coldDigits": "cold_digits", "colddigits": "cold_digits", "coldnumbers": "cold_digits", "cold": "cold_digits",
     "dueDigits": "due_digits", "duedigits": "due_digits", "duenumbers": "due_digits", "due": "due_digits",
@@ -159,14 +165,17 @@ _VARIATION_MAP: Dict[str, str] = {
     "countHot": "sum(1 for d in combo_digits if d in hot_set)",
     "countCold": "sum(1 for d in combo_digits if d in cold_set)",
     "countDue": "sum(1 for d in combo_digits if d in due_set)",
+    # mirror
     "mirrorDigits": "combo_mirror_digits", "mirrordigits": "combo_mirror_digits", "mirrors": "combo_mirror_digits",
     "mirrorSet": "set(combo_mirror_digits)", "mirrorset": "set(combo_mirror_digits)",
     "mirrorPairs": "contains_mirror_pair(combo_digits)", "hasMirrorPair": "contains_mirror_pair(combo_digits)",
     "hasmirrorpair": "contains_mirror_pair(combo_digits)", "hasmirror": "contains_mirror_pair(combo_digits)",
+    # combo / seed
     "comboDigits": "combo_digits", "combodigits": "combo_digits",
     "comboSet": "set(combo_digits)", "comboset": "set(combo_digits)",
     "seedDigits": "seed_digits", "seeddigits": "seed_digits",
     "seedSet": "set(seed_digits)", "seedset": "set(seed_digits)",
+    # parity / counts
     "parityEven": "combo_sum_is_even", "parityeven": "combo_sum_is_even",
     "isEven": "combo_sum_is_even", "iseven": "combo_sum_is_even",
     "isOdd": "not combo_sum_is_even", "isodd": "not combo_sum_is_even",
@@ -174,17 +183,22 @@ _VARIATION_MAP: Dict[str, str] = {
     "highCount": "high_count(combo_digits)", "lowCount": "low_count(combo_digits)",
     "isAllHigh": "all(d >= 5 for d in combo_digits)", "isallhigh": "all(d >= 5 for d in combo_digits)",
     "isAllLow": "all(d <= 4 for d in combo_digits)", "isalllow": "all(d <= 4 for d in combo_digits)",
+    # positional
     "firstDigit": "first_digit(combo_digits)", "firstdigit": "first_digit(combo_digits)",
     "lastDigit": "last_digit(combo_digits)", "lastdigit": "last_digit(combo_digits)",
     "lastTwo": "last_two_digits(combo_digits)", "lasttwo": "last_two_digits(combo_digits)", "last2": "last_two_digits(combo_digits)",
+    # sums / spreads / structure
     "sumDigits": "digit_sum(combo_digits)", "sumdigits": "digit_sum(combo_digits)",
     "digitSum": "digit_sum(combo_digits)", "digitsum": "digit_sum(combo_digits)",
     "sum": "digit_sum(combo_digits)",
     "spreadBand": "spread_band(spread)", "spreadband": "spread_band(spread)",
     "structure": "combo_structure", "struct": "combo_structure",
+    # vtrac
     "vtrack": "VTRAC", "vtracks": "VTRAC", "vtracGroups": "VTRAC", "vtracgroups": "VTRAC",
-    "vtracSet": "combo_vtracs", "vtracset": "combo_vtracs", "comboVtracs": "combo_vtracs", "combovtracs": "combo_vtracs",
-    "vtracLast": "combo_last_vtrac", "vtraclast": "combo_last_vtrac", "lastVtrac": "combo_last_vtrac", "lastvtrac": "combo_last_vtrac",
+    "vtracSet": "combo_vtracs", "vtracset": "combo_vtracs",
+    "comboVtracs": "combo_vtracs", "combovtracs": "combo_vtracs",
+    "vtracLast": "combo_last_vtrac", "vtraclast": "combo_last_vtrac",
+    "lastVtrac": "combo_last_vtrac", "lastvtrac": "combo_last_vtrac",
 }
 
 def normalize_expr(expr: str) -> str:
@@ -373,9 +387,27 @@ def eval_filter_on_pool(row: pd.Series, pool: List[str], base_env: Dict) -> Tupl
             pass
     return eliminated, len(eliminated)
 
+def eval_filter_safety_on_history(row: pd.Series, winners_list: List[str], base_env: Dict, window: int) -> Tuple[int,int,float]:
+    """Return (killed, total, safety_percent). Lower killed => safer. Safety% = 100*(1 - killed/total)."""
+    if not winners_list:
+        return (0, 0, 100.0)
+    recent = winners_list[-window:] if window > 0 else winners_list
+    total = len(recent)
+    code = row["expr_code"]
+    killed = 0
+    for w in recent:
+        env = combo_env(base_env, w)
+        try:
+            if bool(eval(code, {"__builtins__": {}}, env)):
+                killed += 1
+        except Exception:
+            pass
+    safety = 100.0 * (1.0 - (killed / total)) if total else 100.0
+    return killed, total, safety
+
 # ---------------- Planner ----------------
 def greedy_plan(candidates: pd.DataFrame, pool: List[str], base_env: Dict,
-                beam_width: int, max_steps: int, stop_when_remaining_at_most: int | None = None) -> Tuple[List[Dict], List[str]]:
+                beam_width: int, max_steps: int, stop_when_remaining_at_most: Optional[int] = None) -> Tuple[List[Dict], List[str]]:
     remaining = set(pool)
     chosen: List[Dict] = []
     for step in range(int(max_steps)):
@@ -403,7 +435,7 @@ def greedy_plan(candidates: pd.DataFrame, pool: List[str], base_env: Dict,
         if best_cnt == 0: break
     return chosen, sorted(list(remaining))
 
-# ---------------- Sidebar (richer superset) ----------------
+# ---------------- Sidebar (controls) ----------------
 st.sidebar.header("Mode & Thresholds")
 mode = st.sidebar.radio("Mode", ["Playlist Reducer", "Safe Filter Explorer"], index=1)
 min_elims_to_call_it_large = int(st.sidebar.number_input("Min eliminations to call it ‘Large’", 1, 5000, 60))
@@ -411,13 +443,16 @@ beam_width = int(st.sidebar.number_input("Greedy beam width", 1, 20, 6))
 max_steps  = int(st.sidebar.number_input("Greedy max steps", 1, 100, 18))
 exclude_parity_wipers = st.sidebar.checkbox("Exclude parity-wipers", value=True)
 
-st.sidebar.header("Reducer Targets")
+st.sidebar.header("Reducer Targets (Playlist Reducer mode)")
 target_remaining = int(st.sidebar.number_input("Stop when remaining ≤", 0, 100000, 0, help="0 means no early stop"))
 max_filters_apply = int(st.sidebar.number_input("Max filters to apply", 1, 200, 50))
 
-st.sidebar.header("History / Hot-Cold-Due")
+st.sidebar.header("History / H-C-D")
 auto_hcd = st.sidebar.checkbox("Auto-fill H/C/D (when user boxes blank)", value=True)
 auto_hcd_window = int(st.sidebar.number_input("Auto H/C/D window (winners)", 5, 100, 10))
+
+st.sidebar.header("Safety (Explorer mode)")
+safety_window = int(st.sidebar.number_input("Safety history window", 5, 1000, 100))
 
 st.sidebar.header("Diagnostics")
 show_alias_map = st.sidebar.checkbox("Show spelling-variation map", value=False)
@@ -435,7 +470,9 @@ st.session_state["cold_digits"] = cold_digits
 st.session_state["due_digits"]  = due_digits
 
 if show_alias_map:
-    st.expander("Filter spelling variations recognized", expanded=False).write(pd.DataFrame(sorted(_VARIATION_MAP.items()), columns=["variant","canonical"]))
+    st.expander("Filter spelling variations recognized", expanded=False).write(
+        pd.DataFrame(sorted(_VARIATION_MAP.items()), columns=["variant","canonical"])
+    )
 
 st.subheader("Combo Pool")
 pool_text = st.text_area("Paste combos (CSV ‘Result’ column OR tokens separated by newline/space/comma):", height=140)
@@ -496,10 +533,10 @@ else:
 
 st.subheader("Draw History (4 back)")
 c1, c2, c3, c4 = st.columns(4)
-seed      = c1.text_input("Known winner (0‑back)", value="")
-prev_seed = c2.text_input("Draw 1‑back", value="")
-prev_prev = c3.text_input("Draw 2‑back", value="")
-prev_prev_prev = c4.text_input("Draw 3‑back", value="")
+seed      = c1.text_input("Known winner (0-back)", value="")
+prev_seed = c2.text_input("Draw 1-back", value="")
+prev_prev = c3.text_input("Draw 2-back", value="")
+prev_prev_prev = c4.text_input("Draw 3-back", value="")
 
 st.subheader("Filters")
 fids_text = st.text_area("Paste applicable Filter IDs (optional; comma / space / newline separated):", height=90)
@@ -534,41 +571,69 @@ if not run:
     st.stop()
 
 base_env = make_base_env(seed, prev_seed, prev_prev, prev_prev_prev, hot_digits, cold_digits, due_digits)
-st.info(f"Using Hot/Cold/Due everywhere → hot={hot_digits} • cold={cold_digits} • due={due_digits}", icon="🔥")
 
-candidates = filters_df.copy()
-if exclude_parity_wipers and "parity_wiper" in candidates.columns:
-    candidates = candidates[~candidates["parity_wiper"].astype(str).str.lower().isin(["1","true","t","yes","y"])]
-
-max_steps_eff = min(max_steps, max_filters_apply)
-
+# Compute eliminations on current pool for diagnostics
 scores = []
 pool_list = list(pool)
-for _, r in candidates.iterrows():
+for _, r in filters_df.iterrows():
     if not eval_applicable(r, base_env):
         continue
     elim, cnt = eval_filter_on_pool(r, pool_list, base_env)
     scores.append({"id": r["id"], "name": r.get("name",""), "expression": r["expression"], "eliminated_now": cnt})
 
 scored_df = pd.DataFrame(scores).sort_values("eliminated_now", ascending=False)
-st.subheader("Filter Diagnostics (first pass)")
+
+# Branch by mode
+if mode == "Playlist Reducer":
+    st.success("Mode: Playlist Reducer — aggressively shrinking the pool with early stop/limits.")
+    st.caption("We will stop early when remaining ≤ target (if set) and apply at most N filters.")
+    candidates = filters_df.copy()
+    if exclude_parity_wipers and "parity_wiper" in candidates.columns:
+        candidates = candidates[~candidates["parity_wiper"].astype(str).str.lower().isin(["1","true","t","yes","y"])].copy()
+    max_steps_eff = min(max_steps, max_filters_apply)
+    chosen, remaining = greedy_plan(
+        candidates, pool_list, base_env, beam_width, max_steps_eff,
+        stop_when_remaining_at_most=(target_remaining if target_remaining > 0 else None)
+    )
+    st.subheader("Chosen sequence (Reducer):")
+    st.dataframe(pd.DataFrame(chosen), use_container_width=True)
+    st.subheader("Remaining pool after plan")
+    st.write(len(remaining))
+    st.code("\n".join(remaining[:500]))
+
+else:  # Safe Filter Explorer
+    st.info("Mode: Safe Filter Explorer — prefers filters that avoided killing past winners.")
+    safety_rows = []
+    for _, r in filters_df.iterrows():
+        if not eval_applicable(r, base_env):
+            continue
+        killed, total, safety = eval_filter_safety_on_history(r, winners_list, base_env, safety_window)
+        cur_elims = scored_df.loc[scored_df["id"] == r["id"], "eliminated_now"].values
+        eliminated_now = int(cur_elims[0]) if len(cur_elims) else 0
+        safety_rows.append({
+            "id": r["id"], "name": r.get("name",""), "expression": r["expression"],
+            "eliminated_now": eliminated_now,
+            "safety_window": total,
+            "killed_past_winners": killed,
+            "safety_percent": round(safety, 2),
+        })
+    safety_df = pd.DataFrame(safety_rows)
+    safety_df = safety_df.sort_values(["safety_percent","eliminated_now"], ascending=[False, False])
+    st.subheader("Safety table (Explorer)")
+    st.dataframe(safety_df.head(300), use_container_width=True)
+    st.caption("Safety% = 100 × (1 − winners eliminated / winners in window)")
+    st.subheader("Recommended: large & safe candidates")
+    recs = safety_df[(safety_df["eliminated_now"] >= min_elims_to_call_it_large)].head(50)
+    st.dataframe(recs, use_container_width=True)
+
+# Common diagnostics & exports
+st.subheader("Filter Diagnostics (first pass on current pool)")
 st.dataframe(scored_df.head(200), use_container_width=True)
 
-chosen, remaining = greedy_plan(candidates, pool_list, base_env, beam_width, max_steps_eff,
-                                stop_when_remaining_at_most=(target_remaining if target_remaining > 0 else None))
-
-st.subheader("Chosen sequence (in order):")
-st.dataframe(pd.DataFrame(chosen), use_container_width=True)
-
-st.subheader("Best‑case plan — Large filters only")
+st.subheader("Best-case plan — Large filters only (by eliminations)")
 st.caption("Sorted by immediate eliminations on current pool")
 st.dataframe(scored_df[scored_df["eliminated_now"]>=min_elims_to_call_it_large], use_container_width=True)
 
-st.subheader("Remaining pool after plan")
-st.write(len(remaining))
-st.code("\n".join(remaining[:500]))
-
 if export_scored:
-    out_csv = "scored_filters.csv"
-    scored_df.to_csv(out_csv, index=False)
-    st.download_button("Download scored filters CSV", data=scored_df.to_csv(index=False), file_name="scored_filters.csv", mime="text/csv")
+    st.download_button("Download scored filters CSV", data=scored_df.to_csv(index=False),
+                       file_name="scored_filters.csv", mime="text/csv")
