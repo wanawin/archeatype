@@ -1,10 +1,7 @@
 # 1_Large_Filters_Planner.py
 # Large Filters Planner — Archetyper
-# Fixes:
-# - 'mirror' is now a hybrid (callable + dict-like) to support mirror(...) and mirror.get[...] usage.
-# - Removed risky alias that replaced the built-in 'sum', which caused "TypeError: 'int' object is not callable".
-# - The "Undefined token frequency" panel is always shown (with download), even when empty.
-# Everything else (UI/logic) is unchanged from the last version you confirmed.
+# Hotfix: expose lowercase 'mirror' in eval env to match CSV usage.
+# (Previous build only exposed 'MIRROR'.)
 
 from __future__ import annotations
 import io, math, os, random, re, unicodedata
@@ -103,7 +100,7 @@ class _MirrorHybrid:
     def keys(self): return self._m.keys()
     def values(self): return self._m.values()
 
-MIRROR = _MirrorHybrid(MIRROR_MAP)  # exposed as 'mirror' in env (hybrid) & 'MIRROR' if needed
+MIRROR = _MirrorHybrid(MIRROR_MAP)  # hybrid object
 
 def _mk_is_hot(env):  return lambda d: (str(d).isdigit() and int(d) in env.get("hot_set", set()))
 def _mk_is_cold(env): return lambda d: (str(d).isdigit() and int(d) in env.get("cold_set", set()))
@@ -200,7 +197,7 @@ _VARIATION_MAP: Dict[str,str] = {
     # NaN
     "NaN":"nan",
 }
-# NOTE: We intentionally DO NOT map bare 'sum' anymore (it broke built-in sum()).
+# We intentionally DO NOT map bare 'sum' (keep built-in sum()).
 
 def normalize_expr(expr: str) -> str:
     if not expr: return ""
@@ -296,7 +293,9 @@ def make_base_env(seed, prev_seed, prev_prev_seed, prev_prev_prev_seed,
         "prev_seed_digits": digits_of(prev_seed) if prev_seed else [],
         "prev_prev_seed_digits": digits_of(prev_prev_seed) if prev_prev_seed else [],
         "prev_prev_prev_seed_digits": digits_of(prev_prev_prev_seed) if prev_prev_prev_seed else [],
-        "VTRAC": VTRAC, "MIRROR": MIRROR,    # hybrid mirror; keep uppercase name too
+        "VTRAC": VTRAC,
+        "MIRROR": MIRROR,          # UPPERCASE alias
+        "mirror": MIRROR,          # <<< NEW: expose lowercase 'mirror' used by CSV filters
         "hot_digits": sorted(set(hot_digits)),
         "cold_digits": sorted(set(cold_digits)),
         "due_digits":  sorted(set(due_digits)),
@@ -609,7 +608,6 @@ if "last_run" in st.session_state and st.session_state["last_run"]:
         "filter_skips.csv", "text/csv"
     )
 
-    # Always show token-frequency panel (even if empty)
     st.subheader("Undefined token frequency (from NameError)")
     if tok_df is not None and not tok_df.empty:
         st.bar_chart(tok_df.set_index("symbol")["error_count"])
