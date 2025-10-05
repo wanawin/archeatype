@@ -1,6 +1,12 @@
 # 1_Large_Filters_Planner.py
-# Large Filters Planner — Archetyper (full app)
-# Adds: mirror() callable, seed_vtracs, prev_*_vtracs, seed_digits_1..3 aliases, NaN support.
+# Large Filters Planner — Archetyper (full app, updated)
+# - Mirror callable + "mirror of X" normalization
+# - VTRAC sets for seed/history
+# - Digital root + value/root-sum aliases
+# - Robust eval scoping (env as globals & locals) to prevent NameErrors
+# - Session-state caching so downloads don't reset results
+# - Skips/undefined-token reporting
+
 from __future__ import annotations
 
 import io, math, os, random, re, unicodedata
@@ -17,7 +23,7 @@ st.set_page_config(page_title="Large Filters Planner — Archetyper", layout="wi
 st.title("Large Filters Planner — Archetyper")
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Constant maps and whitelisted builtins for eval
+# Constant maps and whitelisted builtins
 # ──────────────────────────────────────────────────────────────────────────────
 VTRAC: Dict[int, int] = {0: 1, 5: 1, 1: 2, 6: 2, 2: 3, 7: 3, 3: 4, 8: 4, 4: 5, 9: 5}
 MIRROR: Dict[int, int] = {0: 5, 5: 0, 1: 6, 6: 1, 2: 7, 7: 2, 3: 8, 8: 3, 4: 9, 9: 4}
@@ -29,12 +35,11 @@ SAFE_BUILTINS = {
     "range": range, "enumerate": enumerate, "map": map, "filter": filter,
     "math": math, "re": re, "random": random, "Counter": Counter,
     "True": True, "False": False, "None": None,
-    # NEW: NaN literal support (many CSV rows contain NaN)
     "nan": float("nan"),
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Small helpers exposed to expressions
+# Helpers exposed to expressions
 # ──────────────────────────────────────────────────────────────────────────────
 def parse_list_any(text: str) -> List[str]:
     if not text: return []
@@ -82,18 +87,16 @@ def contains_mirror_pair(x):
     s = set(safe_digits(x))
     return any((d in s and MIRROR.get(d) in s and MIRROR[d] != d) for d in s)
 
-# NEW: a callable mirror() — many filters use mirror(n) syntax
+# Callable mirror for function-style usage; handles single digits and multi-digit ints/strings
 def mirror_of(x):
     try:
         x = int(x)
     except Exception:
-        # try to mirror each digit in a string like "123"
         ds = [int(ch) for ch in str(x) if ch.isdigit()]
         if not ds: return x
         md = [MIRROR.get(d, d) for d in ds]
         try: return int("".join(str(d) for d in md))
         except Exception: return "".join(str(d) for d in md)
-    # integer path
     if 0 <= x <= 9:
         return MIRROR.get(x, x)
     ds = [int(ch) for ch in str(x)]
@@ -101,7 +104,7 @@ def mirror_of(x):
     try: return int("".join(str(d) for d in md))
     except Exception: return "".join(str(d) for d in md)
 
-# H/C/D lambdas bound to current sets
+# Hot/Cold/Due predicates & counts
 def _mk_is_hot(env):  return lambda d: (str(d).isdigit() and int(d) in env.get("hot_set", set()))
 def _mk_is_cold(env): return lambda d: (str(d).isdigit() and int(d) in env.get("cold_set", set()))
 def _mk_is_due(env):  return lambda d: (str(d).isdigit() and int(d) in env.get("due_set", set()))
@@ -118,7 +121,7 @@ def count_in_due(x, due_set=None):
     ds = due_set if due_set is not None else set(st.session_state.get("due_digits", []))
     return sum(1 for d in safe_digits(x) if d in ds)
 
-# NEW: digital-root helpers + scalar values
+# Digital-root helpers + scalar values
 def digital_root(n: int) -> int:
     try: n = int(n)
     except Exception: n = 0
@@ -136,6 +139,7 @@ def as_int_from_digits(digs) -> int:
 # ──────────────────────────────────────────────────────────────────────────────
 _CAMEL_RE = re.compile(r"(?<!^)(?=[A-Z])")
 def _camel_to_snake(s: str) -> str: return _CAMEL_RE.sub("_", s).lower()
+
 def _ascii(s: str) -> str:
     if s is None: return ""
     s = unicodedata.normalize("NFKD", str(s))
@@ -151,6 +155,14 @@ def _wb_replace(text: str, mapping: Dict[str, str]) -> str:
         text = re.sub(pattern, v, text)
     return text
 
+# Extra phrase normalizations: “mirror of X” → mirror(X)
+def _normalize_phrases(x: str) -> str:
+    # mirror of <expr>  -> mirror(<expr>)
+    x = re.sub(r"\bmirror\s+of\s*\(", "mirror(", x, flags=re.IGNORECASE)
+    # mirror of <name>  -> mirror(<name>)
+    x = re.sub(r"\bmirror\s+of\s+([A-Za-z_][A-Za-z0-9_]*)", r"mirror(\1)", x, flags=re.IGNORECASE)
+    return x
+
 _VARIATION_MAP: Dict[str, str] = {
     # H/C/D
     "hotDigits":"hot_digits","hotdigits":"hot_digits","hotnumbers":"hot_digits","hot":"hot_digits",
@@ -162,11 +174,10 @@ _VARIATION_MAP: Dict[str, str] = {
     "countHot":"sum(1 for d in combo_digits if d in hot_set)",
     "countCold":"sum(1 for d in combo_digits if d in cold_set)",
     "countDue":"sum(1 for d in combo_digits if d in due_set)",
-    # mirror
+    # mirror variants; function calls use mirror() from env
     "mirrorDigits":"combo_mirror_digits","mirrordigits":"combo_mirror_digits","mirrors":"combo_mirror_digits",
     "mirrorSet":"set(combo_mirror_digits)","mirrorset":"set(combo_mirror_digits)",
     "mirrorPairs":"contains_mirror_pair(combo_digits)","hasMirrorPair":"contains_mirror_pair(combo_digits)",
-    # NOTE: allow function-style calls: mirror(x) is already handled by providing mirror callable in env
     "mirrorOf":"mirror","mirror_of":"mirror",
     # combo/seed
     "comboDigits":"combo_digits","combodigits":"combo_digits",
@@ -205,6 +216,7 @@ _VARIATION_MAP: Dict[str, str] = {
 def normalize_expr(expr: str) -> str:
     if not expr: return ""
     x = _ascii(expr)
+    x = _normalize_phrases(x)
     for t in [
         "hotDigits","coldDigits","dueDigits","mirrorPairs","mirrorDigits","seedDigits",
         "comboDigits","percentHot","percentCold","percentDue","evenCount","oddCount","highCount","lowCount",
@@ -299,7 +311,7 @@ def make_base_env(seed, prev_seed, prev_prev_seed, prev_prev_prev_seed,
         "prev_seed_digits": digits_of(prev_seed) if prev_seed else [],
         "prev_prev_seed_digits": digits_of(prev_prev_seed) if prev_prev_seed else [],
         "prev_prev_prev_seed_digits": digits_of(prev_prev_prev_seed) if prev_prev_prev_seed else [],
-        "VTRAC": VTRAC, "MIRROR": MIRROR,  # keep dicts
+        "VTRAC": VTRAC, "MIRROR": MIRROR,
         "hot_digits": sorted(set(hot_digits)),
         "cold_digits": sorted(set(cold_digits)),
         "due_digits":  sorted(set(due_digits)),
@@ -310,7 +322,7 @@ def make_base_env(seed, prev_seed, prev_prev_seed, prev_prev_prev_seed,
         "digit_span": digit_span, "classify_structure": classify_structure, "has_triplet": has_triplet,
         "contains_mirror_pair": contains_mirror_pair, "vtrac_of": vtrac_of,
         "digital_root": digital_root,
-        # expose callable mirror()
+        # Expose callable mirror()
         "mirror": mirror_of, "mirror_of": mirror_of,
         **SAFE_BUILTINS,
         # combo placeholders
@@ -318,7 +330,7 @@ def make_base_env(seed, prev_seed, prev_prev_seed, prev_prev_prev_seed,
         "combo_sum": 0, "combo_sum_is_even": False,
         "combo_last_digit": None, "combo_structure": "single",
     }
-    # NEW: seed scalar values + root sums
+    # Seed scalar values + root sums
     seed_value = as_int_from_digits(env["seed_digits"])
     prev_seed_value = as_int_from_digits(env["prev_seed_digits"])
     prev_prev_seed_value = as_int_from_digits(env["prev_prev_seed_digits"])
@@ -332,7 +344,7 @@ def make_base_env(seed, prev_seed, prev_prev_seed, prev_prev_prev_seed,
         "prev_seed_root_sum": digital_root(prev_seed_value),
         "prev_prev_seed_root_sum": digital_root(prev_prev_seed_value),
         "prev_prev_prev_seed_root_sum": digital_root(prev_prev_prev_seed_value),
-        # NEW: vtracs for seed/history (requested by CSV)
+        # vtracs for seed/history
         "seed_vtracs": set(VTRAC[d] for d in env["seed_digits"]) if env["seed_digits"] else set(),
         "prev_seed_vtracs": set(VTRAC[d] for d in env["prev_seed_digits"]) if env["prev_seed_digits"] else set(),
         "prev_prev_seed_vtracs": set(VTRAC[d] for d in env["prev_prev_seed_digits"]) if env["prev_prev_seed_digits"] else set(),
@@ -367,11 +379,13 @@ def combo_env(base_env: Dict, combo: str) -> Dict:
     return env
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Evaluators (tester-style, with error logging)
+# Evaluators (skip-on-error + robust scoping)
 # ──────────────────────────────────────────────────────────────────────────────
 def eval_applicable(row: pd.Series, base_env: Dict) -> bool:
     try:
-        return bool(eval(row["applicable_code"], {"__builtins__": {}}, base_env))
+        globs = {"__builtins__": {}}
+        globs.update(base_env)
+        return bool(eval(row["applicable_code"], globs, base_env))
     except Exception:
         return True
 
@@ -385,7 +399,9 @@ def eval_filter_on_pool(row: pd.Series, pool: List[str], base_env: Dict,
     for c in pool:
         env = combo_env(base_env, c)
         try:
-            if bool(eval(code, {"__builtins__": {}}, env)):
+            globs = {"__builtins__": {}}
+            globs.update(env)
+            if bool(eval(code, globs, env)):
                 eliminated.add(c)
         except Exception as e:
             rec = runtime_errors_accum.setdefault(
@@ -401,7 +417,7 @@ def eval_filter_on_pool(row: pd.Series, pool: List[str], base_env: Dict,
     return eliminated, len(eliminated)
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Sidebar — preserved
+# Sidebar — unchanged
 # ──────────────────────────────────────────────────────────────────────────────
 st.sidebar.subheader("Mode")
 mode = st.sidebar.radio("", options=["Playlist Reducer", "Safe Filter Explorer"], index=1, label_visibility="collapsed")
@@ -417,7 +433,7 @@ use_archetype_lift = st.sidebar.checkbox("Use archetype-lift CSV if present", va
 arch_path = st.sidebar.text_input("Archetype-lifts CSV path", value="archetype_filter_dimension.csv")
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Center UI (always visible)
+# Center UI
 # ──────────────────────────────────────────────────────────────────────────────
 st.subheader("Hot / Cold / Due digits (optional)")
 cc1, cc2, cc3 = st.columns(3)
@@ -482,7 +498,7 @@ if exclude_parity_wipers and len(filters_df):
 st.caption(f"Filters loaded: {len(filters_df)}")
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Run button — store results in session_state (downloads won't reset)
+# Run & cache
 # ──────────────────────────────────────────────────────────────────────────────
 def run_planner_and_cache():
     base_env = make_base_env(
@@ -498,7 +514,7 @@ def run_planner_and_cache():
     token_freq: Dict[str,int] = defaultdict(int)
 
     for _, r in filters_df.iterrows():
-        # compile issues → skipped entries
+        # capture compile issues
         if str(r.get("compile_error_applicable","")).strip():
             fid = str(r.get("id","")); fname = str(r.get("name",""))
             runtime_errors[fid] = {"id": fid, "name": fname, "error_type": "compile",
@@ -542,7 +558,9 @@ def run_planner_and_cache():
             row_full = filters_df.loc[filters_df["id"]==r["id"]].iloc[0]
             env_seed = combo_env(base_env, seed)
             try:
-                knocks_winner = bool(eval(row_full["expr_code"], {"__builtins__": {}}, env_seed))
+                globs = {"__builtins__": {}}
+                globs.update(env_seed)
+                knocks_winner = bool(eval(row_full["expr_code"], globs, env_seed))
             except Exception:
                 knocks_winner = False
             if not knocks_winner and r["eliminated_now"] >= min_large:
