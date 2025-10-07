@@ -473,7 +473,6 @@ NO296F355,XIf any combo digit = mirror of seed sum last digit,True,"""True""",""
 1F475,"If last three seeds are ('Very Low', 'Odd', 'Very Low', 'Even', 'High', 'Even') eliminate combos outside Mid (100% over 1 cases)",True,"combo_sum_cat != 'Mid'","prev_pattern == ('Very Low','Odd','Very Low','Even','High','Even')",,,,,,,,,,
 1F476,"If last three seeds are ('Very Low', 'Odd', 'Very Low', 'Even', 'Low', 'Even') eliminate combos outside Mid (100% over 1 cases)",True,"combo_sum_cat != 'Mid'","prev_pattern == ('Very Low','Odd','Very Low','Even','Low','Even')",,,,,,,,,,
 1F477,"If last three seeds are ('Very Low', 'Odd', 'Very Low', 'Odd', 'Low', 'Even') eliminate combos outside Low (100% over 1 cases)",True,"combo_sum_cat != 'Low'","prev_pattern == ('Very Low','Odd','Very Low','Odd','Low','Even')",,,,,,,,,,
-
 365F478,DNUEliminate all odd-sum combos,True,"""True""","""combo_sum % 2 != 0""",,,,,,,,,,
 364F479,DNUEliminate all even-sum combos,True,"""True""","""combo_sum % 2 == 0""",,,,,,,,,,
 0F480,"xIf seed includes 0,0 eliminate odd-sum combos",True,"""seed_digits.count(0) >= 2""","""combo_sum % 2 != 0""",,,,,,,,,,
