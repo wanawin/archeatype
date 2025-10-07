@@ -353,7 +353,7 @@ NO467F354,DNUIf combo contains digit and its mirror,True,"""True""","""any(mirro
 NO296F355,XIf any combo digit = mirror of seed sum last digit,True,"""True""","""any(d == mirror.get(int(str(seed_value)[-1]),-1) for d in combo_digits)""",,,,,,,,,,
 42F356,"XIf seed has 0,8 eliminate combos with even sum",True,"""set(seed_digits).issuperset({0,8})""","""combo_sum%2==0""",,,,,,,,,,
 22F357,"Eliminate combos when previous seed sum >20, current seed sum <20, and combo sum <20",True,True,"prev_seed_sum > 20 and seed_sum < 20 and combo_sum < 20""",,,,,,,,,,
-0F358,"If last three seeds are ('High','Even','High','Odd','Low','Even') eliminate combos outside Low (100% over 1 cases)",True,"""combo_sum_cat != 'Low', prev_pattern == ('High','Even','High','Odd','Low','Even')""",,,,,,,,,,
+0F358,"If last three seeds are ('High','Even','High','Odd','Low','Even') eliminate combos outside Low (100% over 1 cases)",True,"combo_sum_cat != 'Low'","prev_pattern == ('High','Even','High','Odd','Low','Even')",,,,,,,,,,
 0F359,"If last three seeds are ('High', 'Even', 'Mid', 'Odd', 'Low', 'Odd') eliminate combos outside Mid (100% over 1 cases)",True,"combo_sum_cat != 'Mid'","prev_pattern == ('High','Even','Mid','Odd','Low','Odd')",,,,,,,,,,
 0F360,"If last three seeds are ('High', 'Even', 'Mid', 'Odd', 'Mid', 'Even') eliminate combos outside Low (100% over 1 cases)",True,"combo_sum_cat != 'Low'","prev_pattern == ('High','Even','Mid','Odd','Mid','Even')",,,,,,,,,,
 0F361,"If last three seeds are ('High', 'Even', 'Very Low', 'Odd', 'Mid', 'Even') eliminate combos outside Mid (100% over 1 cases)",True,"combo_sum_cat != 'Mid'","prev_pattern == ('High','Even','Very Low','Odd','Mid','Even')",,,,,,,,,,
