@@ -120,68 +120,70 @@ def box_key(combo: str) -> str:
     return ''.join(sorted(combo))
 
 
-def generate_from_schema(schema_letters: List[str], letter_to_digits: Dict[str, List[str]],
-                         must_hit_any_anchor: List[List[str]] | None,
-                         due_on_cold_letters: List[str] | None,
-                         d1: Optional[str], d2: Optional[str],
-                         prefer_n_double: bool,
-                         cap: int = 50000) -> List[Tuple[str, int]]:
-    """
-    Expand a letter schema (e.g., ["A","B","E","E","J"]) into concrete combos using the provided
-    candidate digits per letter (drift already applied). Score:
+def generate_from_schema(
+    schema_letters: List[str],
+    letter_to_digits: Dict[str, List[str]],
+    must_hit_any_anchor: Optional[List[List[str]]],
+    due_on_cold_letters: Optional[List[str]],
+    d1: Optional[str], d2: Optional[str],
+    is_due: Dict[str, bool],
+    prefer_n_double: bool,
+    cap: int = 50000,
+) -> List[Tuple[str, int]]:
+    """Expand a letter schema into concrete combos and score them.
+    Scoring:
       +2 if any anchor subset is contained in digits
-      +2 if any digit in due_on_cold_letters is Due
+      +2 if a **Due** digit appears from any `due_on_cold_letters` pool (e.g., I/J)
       +1 if D1 present, +1 if D2 present
-      +1 if the double (if present) is from a "neutral" letter (E/F) or is Due
+      +1 if schema's double is realized; +1 extra if the double is from neutral letters (E/F) or the doubled digit is Due
     Returns list of (combo, score).
     """
-    # precompute whether a letter is "neutral" (middle band): E/F
-    neutral_letters = set(["E","F"])  # maps to ranks 5–6 nominally
+    from collections import Counter
 
-    # Build candidate pools list respecting multiplicities (letters may repeat for doubles)
-    pools: List[List[str]] = [letter_to_digits[L] for L in schema_letters]
+    neutral_letters = {"E", "F"}
+    pools: List[List[str]] = [letter_to_digits.get(L, []) for L in schema_letters]
 
     res: List[Tuple[str, int]] = []
     seen_box = set()
 
-    # Simple backtracking with early exits; avoid explosion via cap
-    used = Counter()
-
     def score_combo(ds: List[str]) -> int:
         s = 0
-        # anchors
+        ds_set = set(ds)
+        # Anchors
         if must_hit_any_anchor:
             for a in must_hit_any_anchor:
-                if set(a).issubset(set(ds)):
+                if set(a).issubset(ds_set):
                     s += 2
                     break
-        # due on cold letters (I,J are coldest by letter; allow H if user configured it)
+        # Due on cold letters (e.g., I/J) — only if the digit is Due
         if due_on_cold_letters:
+            hit = False
             for L in due_on_cold_letters:
-                for d in ds:
-                    if d in letter_to_digits[L]:
-                        # if pool for that letter had Due emphasis, treat as +2 once
-                        s += 2
-                        due_on_cold_letters = None  # count once
-                        break
+                pool = set(letter_to_digits.get(L, []))
+                if any((d in pool) and is_due.get(d, False) for d in ds):
+                    hit = True
+                    break
+            if hit:
+                s += 2
         # D1/D2 presence
-        if d1 and d1 in ds:
+        if d1 and d1 in ds_set:
             s += 1
-        if d2 and d2 in ds:
+        if d2 and d2 in ds_set:
             s += 1
-        # double bonus
+        # Double bonus
         cnts = Counter(ds)
         for L in set(schema_letters):
             if schema_letters.count(L) >= 2:
-                # if schema calls for a double on letter L
-                if any(cnts[d] >= 2 and d in letter_to_digits[L] for d in set(ds)):
+                pool = set(letter_to_digits.get(L, []))
+                doubled = [x for x, c in cnts.items() if c >= 2]
+                if any(x in pool for x in doubled):
                     s += 1
-                    if L in neutral_letters:
+                    if (L in neutral_letters) or any(is_due.get(x, False) for x in doubled):
                         s += 1
         return s
 
+    # Backtracking (box-unique by sorted key)
     def backtrack(i: int, cur: List[str]):
-        nonlocal seen_box
         if len(res) >= cap:
             return
         if i == len(pools):
@@ -191,14 +193,11 @@ def generate_from_schema(schema_letters: List[str], letter_to_digits: Dict[str, 
             if key in seen_box:
                 return
             seen_box.add(key)
-            sc = score_combo(cur)
-            res.append((''.join(cur), sc))
+            res.append((''.join(cur), score_combo(cur)))
             return
         for d in pools[i]:
             cur.append(d)
-            used[d] += 1
-            backtrack(i+1, cur)
-            used[d] -= 1
+            backtrack(i + 1, cur)
             cur.pop()
 
     backtrack(0, [])
@@ -306,6 +305,11 @@ if not schemas:
     st.stop()
 
 # Generate
+run_it = st.button("Run generator")
+if not run_it:
+    st.info("Enter winners then click **Run generator** to build combos.")
+    st.stop()
+
 all_results: List[Tuple[str,int]] = []
 for schema in schemas:
     res = generate_from_schema(
@@ -314,6 +318,7 @@ for schema in schemas:
         must_hit_any_anchor=anchors if anchors_on else None,
         due_on_cold_letters=cold_letters if prefer_cold_due else None,
         d1=d1, d2=d2,
+        is_due=is_due,
         prefer_n_double=True,
         cap=50000,
     )
