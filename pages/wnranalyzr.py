@@ -1,307 +1,373 @@
-# wnranalyzr.py
-# DC5 Hot/Cold/Due Analyzer — v0.6
-# - Single Run button
-# - Robust TXT parsing (00458 and 0-0-4-5-8 / 0–0–4–5–8)
-# - Rolling hot/cold/due computed from prior draws only
-# - Expanded Summary (always expanded) + distribution tables
-# - CSV / TXT exports
-# - No auto-refresh while downloading
-
-from __future__ import annotations
 import io
 import re
-from dataclasses import dataclass
-from typing import List, Tuple, Dict
-
+import math
+import json
 import numpy as np
 import pandas as pd
 import streamlit as st
+from collections import Counter, defaultdict
+
+# ------------------------------
+# Helpers
+# ------------------------------
+
+DIGITS = list("0123456789")
+
+def parse_uploaded(file) -> pd.DataFrame:
+    """
+    Accepts .csv or .txt.
+    - CSV: looks for any 5-digit column; otherwise scans whole text.
+    - TXT: scans entire text for 5-digit winners, preserving leading zeros.
+    Also accepts hyphenated like 0-0-4-5-8.
+    Returns DataFrame with columns: ['raw', 'winner', 'digits'] (digits = list[str] len=5)
+    """
+    name = file.name.lower()
+
+    def scan_text(text: str) -> list[str]:
+        winners = []
+        # 5 contiguous digits
+        winners += re.findall(r'(?<!\d)(\d{5})(?!\d)', text)
+        # hyphenated (e.g. 0-0-4-5-8)
+        winners += ["".join(g) for g in re.findall(r'(?<!\d)(\d)-(\d)-(\d)-(\d)-(\d)(?!\d)', text)]
+        return winners
+
+    if name.endswith(".csv"):
+        df = pd.read_csv(file, dtype=str, keep_default_na=False)
+        # try to find a 5-digit column
+        five_digit_cols = [c for c in df.columns
+                           if df[c].astype(str).str.fullmatch(r"\d{5}").fillna(False).any()]
+        winners = []
+        if five_digit_cols:
+            for c in five_digit_cols:
+                winners += df[c].astype(str).str.extract(r"(\d{5})", expand=False).dropna().tolist()
+        else:
+            # fallback: whole-file scan
+            text = df.to_csv(index=False)
+            winners = scan_text(text)
+    else:
+        text = io.TextIOWrapper(file, encoding="utf-8", errors="ignore").read()
+        winners = scan_text(text)
+
+    winners = [w.strip() for w in winners if re.fullmatch(r"\d{5}", w)]
+    data = [{'raw': w, 'winner': w, 'digits': list(w)} for w in winners]
+    return pd.DataFrame(data)
 
 
-# ---------- parsing ----------
-WIN_CONTIGUOUS = re.compile(r"(?<!\d)(\d{5})(?!\d)")
-WIN_HYPHENATED = re.compile(r"(?<!\d)(\d)[\-\–](\d)[\-\–](\d)[\-\–](\d)[\-\–](\d)(?!\d)")
-
-def _normalize_winner_token(tok: str) -> str:
-    tok = tok.strip()
-    return tok if len(tok) == 5 else tok.zfill(5)
-
-def parse_winners_from_text(text: str) -> List[str]:
-    winners: List[Tuple[int, str]] = []
-    for m in WIN_HYPHENATED.finditer(text):
-        winners.append((m.start(), _normalize_winner_token("".join(m.groups()))))
-    for m in WIN_CONTIGUOUS.finditer(text):
-        winners.append((m.start(), _normalize_winner_token(m.group(1))))
-    winners.sort(key=lambda x: x[0])
-    return [w for _, w in winners]
-
-def parse_uploaded_file(file) -> List[str]:
-    name = (file.name or "").lower()
-    data = file.read()
-    if isinstance(data, bytes):
-        data = data.decode("utf-8", errors="ignore")
-
-    if name.endswith(".txt") or not name.endswith(".csv"):
-        return parse_winners_from_text(data)
-
-    # CSV path
-    df = pd.read_csv(io.StringIO(data))
-    maybe_cols = list(df.columns)
-    preferred = ["winner", "winning", "result", "results", "combo", "number", "numbers"]
-    for p in preferred:
-        for c in list(maybe_cols):
-            if p in str(c).lower():
-                maybe_cols.insert(0, maybe_cols.pop(maybe_cols.index(c)))
-                break
-
-    for c in maybe_cols:
-        vals = df[c].astype(str).fillna("").tolist()
-        tmp, ok = [], 0
-        for v in vals:
-            v = v.strip()
-            m1 = WIN_HYPHENATED.fullmatch(v)
-            m2 = WIN_CONTIGUOUS.fullmatch(v)
-            if m1:
-                tmp.append("".join(m1.groups())); ok += 1
-            elif m2:
-                tmp.append(_normalize_winner_token(m2.group(1))); ok += 1
-            else:
-                found = parse_winners_from_text(v)
-                if len(found) == 1:
-                    tmp.append(found[0]); ok += 1
-                elif len(found) > 1:
-                    ok = -999; break
-        if ok > 0:
-            return [_normalize_winner_token(t) for t in tmp if t]
-
-    return parse_winners_from_text(data)
-
-def detect_order(_w: List[str]) -> str:
-    # Simple default; user can override
-    return "Newest first"
+def order_rows(df: pd.DataFrame, mode: str) -> pd.DataFrame:
+    """
+    mode in {'auto','newest','oldest'}
+    'auto' guesses from simple sequence in input (assumes newest first if ambiguous).
+    """
+    if mode == "newest":
+        return df.reset_index(drop=True)
+    if mode == "oldest":
+        return df.iloc[::-1].reset_index(drop=True)
+    # auto guess: if the first ~20 are unique (they are), treat as newest-first
+    return df.reset_index(drop=True)
 
 
-# ---------- labeling ----------
-@dataclass
-class Params:
-    window_for_hotcold: int
-    pct_hot: int
-    pct_cold: int
-    due_threshold: int
+def rank_hot_cold(df: pd.DataFrame, window: int, pct_hot: int, pct_cold: int):
+    """
+    Returns:
+      - hottest_to_coldest: list of digits from hottest -> coldest (by freq in trailing window)
+      - maps: heat_rank[digit]=1..10 (1 hottest), cold_rank[digit]=1..10 (1 coldest)
+      - sets: HOT, COLD, NEUTRAL (by percentile thresholds)
+    """
+    # trailing window winners (0 => use all)
+    subset = df if window == 0 else df.iloc[:window]
 
-def freq_counts(history: List[str]) -> Dict[str, int]:
-    counts = {str(d): 0 for d in range(10)}
-    for w in history:
-        for ch in w:
-            counts[ch] += 1
-    return counts
+    # frequency over window
+    counts = Counter(d for row in subset["digits"] for d in row)
+    # ensure all digits present
+    for d in DIGITS:
+        counts.setdefault(d, 0)
 
-def label_hot_cold(counts: Dict[str, int], pct_hot: int, pct_cold: int) -> Tuple[set, set]:
-    full = {str(d): counts.get(str(d), 0) for d in range(10)}
-    ser = pd.Series(full).sort_values(ascending=False)
-    n = len(ser)
-    n_hot = int(np.floor(n * (pct_hot / 100.0)))
-    n_cold = int(np.floor(n * (pct_cold / 100.0)))
-    hot = set(ser.index[:n_hot]) if n_hot > 0 else set()
-    cold = set(ser.sort_values(ascending=True).index[:n_cold]) if n_cold > 0 else set()
-    cold -= hot
-    return hot, cold
+    # hotter -> colder
+    hottest = sorted(DIGITS, key=lambda d: (-counts[d], d))
+    coldest = list(reversed(hottest))
 
-def due_set(history: List[str], due_threshold: int) -> set:
-    if due_threshold <= 0:
-        return set()
-    recent = history[-due_threshold:] if due_threshold <= len(history) else history[:]
-    seen = set(ch for w in recent for ch in w)
-    return set(str(d) for d in range(10)) - seen
+    heat_rank = {d: i+1 for i, d in enumerate(hottest)}   # 1..10 hottest→coldest
+    cold_rank = {d: i+1 for i, d in enumerate(coldest)}   # 1..10 coldest→hottest
+
+    # threshold sets (percent of 10 digits)
+    n_hot  = max(1, round(10 * pct_hot/100))
+    n_cold = max(1, round(10 * pct_cold/100))
+    HOT  = set(hottest[:n_hot])
+    COLD = set(coldest[:n_cold])
+    NEUTRAL = set(DIGITS) - HOT - COLD
+
+    return hottest, heat_rank, cold_rank, HOT, COLD, NEUTRAL
 
 
-# ---------- analysis ----------
-def analyze(old_to_new: List[str], params: Params):
-    if not old_to_new:
-        return pd.DataFrame(), {}, [], []
+def due_mask(df: pd.DataFrame, due_lookback: int) -> list[set]:
+    """
+    Produces a per-row set of digits that are 'due' at that row:
+      'due' means 'not seen in the previous N winners' (look-back).
+    We mark due *at the time of the win*, using only prior rows.
+    """
+    prev_seen = Counter()
+    history = []
 
-    # quick hottest→coldest using latest window/all
-    refer = old_to_new if params.window_for_hotcold == 0 else old_to_new[-params.window_for_hotcold:]
-    ordered_digits = list(pd.Series(freq_counts(refer)).sort_values(ascending=False).index)
+    for i, row in df.iterrows():
+        # build set of digits seen in prior N rows
+        start = max(0, i - due_lookback)
+        recent = df.iloc[start:i]
+        seen_recent = set(d for r in recent['digits'] for d in r)
+        # due digits are those NOT in seen_recent
+        due_now = set(DIGITS) - seen_recent
+        history.append(due_now)
+
+    return history
+
+
+def bucket_5_from_heat_rank(r: int) -> int:
+    """1..10 hottest->coldest → bucket 1..5 by ceil(rank/2)."""
+    return math.ceil(r / 2)
+
+def bucket_5_from_cold_rank(r: int) -> int:
+    """1..10 coldest->hottest → bucket 1..5 by ceil(rank/2)."""
+    return math.ceil(r / 2)
+
+
+def label_digit(d: str, heat_rank: dict, cold_rank: dict, HOT: set, COLD: set, due_set: set):
+    """
+    Returns a token:
+      - Hot: 'Hk/5'  (k in 1..5, from heat_rank 1..10)
+      - Cold: 'Ck/5' (k in 1..5, from cold_rank 1..10)
+      - Due:  'D1/2' if due, else 'D2/2'
+      - Neutral: 'N'
+    Note: a digit can be both Hot and Due (or Cold and Due); we keep *both* tokens.
+    """
+    tokens = []
+    if d in HOT:
+        tokens.append(f"H{bucket_5_from_heat_rank(heat_rank[d])}/5")
+    elif d in COLD:
+        tokens.append(f"C{bucket_5_from_cold_rank(cold_rank[d])}/5")
+    else:
+        tokens.append("N")
+
+    # Due status
+    tokens.append("D1/2" if d in due_set else "D2/2")
+    return tokens
+
+
+def canonical_box_schematic(tokens_per_digit: list[list[str]]) -> str:
+    """
+    Order-invariant BOX schematic:
+      - flatten tokens
+      - count identical tokens
+      - produce 'TokenxK + TokenxJ + ...' with alphabetical token order
+    Example: ['H1/5','D1/2'], ['H3/5','D2/2'], ['C2/5','D1/2'], ['N','D2/2'], ['H1/5','D1/2']
+     -> 'C2/5x1 + D1/2x3 + D2/2x2 + H1/5x2 + H3/5x1 + N x1'
+    """
+    flat = [t for pair in tokens_per_digit for t in pair]
+    cnt = Counter(flat)
+    parts = []
+    for token in sorted(cnt.keys()):
+        k = cnt[token]
+        if token == "N":
+            parts.append("N x{}".format(k))
+        else:
+            parts.append(f"{token}x{k}")
+    return " + ".join(parts)
+
+
+def per_winner_rows(df: pd.DataFrame,
+                    window: int,
+                    pct_hot: int,
+                    pct_cold: int,
+                    due_lookback: int) -> tuple[pd.DataFrame, dict]:
+    """
+    Builds a per-winner table with counts and schematic.
+    Returns (table, meta)
+    """
+    # compute heat/cold ranks on the chosen trailing window relative to each row
+    hottest, heat_rank, cold_rank, HOT, COLD, NEUTRAL = rank_hot_cold(df, window, pct_hot, pct_cold)
+    due_history = due_mask(df, due_lookback)
 
     rows = []
-    for i, winner in enumerate(old_to_new):
-        prior = old_to_new[:i]
-        if not prior:
-            rows.append({
-                "idx": i, "winner": winner, "sum": sum(int(c) for c in winner),
-                "hot_hits": 0, "cold_hits": 0, "due_hits": 0,
-                "neutral_hits": 5, "hot_and_due_hits": 0,
-                "hot_digits": "", "cold_digits": "", "due_digits": "",
-            })
-            continue
+    for i, row in df.iterrows():
+        w = row["winner"]
+        digits = row["digits"]
+        due_set = due_history[i]
 
-        window = prior[-params.window_for_hotcold:] if params.window_for_hotcold > 0 else prior
-        counts = freq_counts(window)
-        hot, cold = label_hot_cold(counts, params.pct_hot, params.pct_cold)
-        due = due_set(prior, params.due_threshold)
+        token_pairs = [label_digit(d, heat_rank, cold_rank, HOT, COLD, due_set) for d in digits]
 
-        digits = list(winner)
-        hot_hits  = sum(d in hot  for d in digits)
-        cold_hits = sum(d in cold for d in digits)
-        due_hits  = sum(d in due  for d in digits)
-        labeled = hot | cold | due
-        neutral_hits = sum(d not in labeled for d in digits)
-        hot_and_due_hits = sum(d in hot and d in due for d in digits)
+        # counts
+        hot_hits = sum(1 for pair in token_pairs if any(t.startswith("H") for t in pair))
+        cold_hits = sum(1 for pair in token_pairs if any(t.startswith("C") for t in pair))
+        neutral_hits = sum(1 for pair in token_pairs if "N" in pair)
+        due_hits = sum(1 for pair in token_pairs if "D1/2" in pair)
+
+        schematic = canonical_box_schematic(token_pairs)
 
         rows.append({
-            "idx": i, "winner": winner, "sum": sum(int(c) for c in winner),
-            "hot_hits": hot_hits, "cold_hits": cold_hits, "due_hits": due_hits,
-            "neutral_hits": neutral_hits, "hot_and_due_hits": hot_and_due_hits,
-            "hot_digits": ",".join(sorted(hot)),
-            "cold_digits": ",".join(sorted(cold)),
-            "due_digits": ",".join(sorted(due)),
+            "idx": i+1,                  # 1-based index in chosen order
+            "winner": w,
+            "digits": "".join(digits),
+            "hot_hits": hot_hits,
+            "cold_hits": cold_hits,
+            "due_hits": due_hits,
+            "neutral_hits": neutral_hits,
+            "schematic_box": schematic
         })
 
-    df = pd.DataFrame(rows)
+    table = pd.DataFrame(rows)
 
-    # rich summary
-    def dist(col):
-        s = df[col].value_counts().sort_index()
-        pct = (s / len(df) * 100).round(2)
-        out = pd.DataFrame({"count": s, "pct": pct})
-        for k in range(0, 6):  # ensure 0..5 present
-            if k not in out.index:
-                out.loc[k] = {"count": 0, "pct": 0.0}
-        return out.sort_index()
+    # summary: frequency of schematics (order-invariant)
+    freq = (table
+            .groupby("schematic_box", as_index=False)
+            .size()
+            .rename(columns={"size": "count"}))
+    total = len(table)
+    freq["pct"] = (freq["count"] / total * 100).round(2)
+    freq = freq.sort_values(["count", "schematic_box"], ascending=[False, True]).reset_index(drop=True)
 
-    summary = {
-        "n_winners": int(len(df)),
-        "window_for_hotcold": int(params.window_for_hotcold),
-        "pct_hot": int(params.pct_hot),
-        "pct_cold": int(params.pct_cold),
-        "due_threshold": int(params.due_threshold),
-        "means": {
-            "hot_hits": float(df["hot_hits"].mean()),
-            "cold_hits": float(df["cold_hits"].mean()),
-            "due_hits": float(df["due_hits"].mean()),
-            "neutral_hits": float(df["neutral_hits"].mean()),
-            "hot_and_due_hits": float(df["hot_and_due_hits"].mean()),
-            "sum": float(df["sum"].mean()),
+    meta = {
+        "hottest_to_coldest": hottest,
+        "params": {
+            "window": window,
+            "pct_hot": pct_hot,
+            "pct_cold": pct_cold,
+            "due_lookback": due_lookback
         },
+        "totals": {
+            "winners": total
+        }
     }
-
-    dist_tables = {
-        "hot_hits_dist":  dist("hot_hits"),
-        "cold_hits_dist": dist("cold_hits"),
-        "due_hits_dist":  dist("due_hits"),
-        "neutral_hits_dist": dist("neutral_hits"),
-        "hot_and_due_hits_dist": dist("hot_and_due_hits"),
-    }
-
-    return df, summary, dist_tables, ordered_digits
+    return table, {"schematic_freq": freq, **meta}
 
 
-# ---------- UI ----------
+def to_txt_summary(meta_and_freq: dict, table: pd.DataFrame) -> str:
+    hottest = meta_and_freq["hottest_to_coldest"]
+    params = meta_and_freq["params"]
+    freq = meta_and_freq["schematic_freq"]
+    totals = meta_and_freq["totals"]
+
+    lines = []
+    lines.append("DC5 Hot/Cold/Due Analyzer — BOX schematics")
+    lines.append(f"Total winners: {totals['winners']}")
+    lines.append(f"Window for hot/cold: {params['window']} | %Hot: {params['pct_hot']} | %Cold: {params['pct_cold']} | Due threshold: last {params['due_lookback']} draws")
+    lines.append("Hottest→Coldest: " + ", ".join(hottest))
+    lines.append("")
+    lines.append("Top schematics (order-invariant):")
+    for _, r in freq.iterrows():
+        lines.append(f"  {r['schematic_box']}  —  {r['count']} ({r['pct']}%)")
+    lines.append("")
+    lines.append("Per-winner counts (first 25 rows):")
+    head = table[["idx","winner","hot_hits","cold_hits","due_hits","neutral_hits"]].head(25)
+    lines.append(head.to_string(index=False))
+    return "\n".join(lines)
+
+
+# ------------------------------
+# UI
+# ------------------------------
+
 st.set_page_config(page_title="DC5 Hot/Cold/Due Analyzer", layout="wide")
-st.title("DC5 Hot/Cold/Due Analyzer — v0.6")
 
-with st.sidebar:
-    st.header("1) Input")
-    uploaded = st.file_uploader("Upload winners (.csv or .txt)", type=["csv", "txt"])
+st.title("DC5 Hot/Cold/Due Analyzer — v0.6 (Run button + ranked H/C, Due buckets, BOX schematics)")
 
-    st.header("2) File order")
-    order_choice = st.radio(
-        "Row order in file:",
-        ["Auto (guess)", "Newest first", "Oldest first"],
-        index=1,
-        help="We compute labels for each winner using only prior draws."
-    )
+# 1) Input
+st.sidebar.header("1) Input")
+up = st.sidebar.file_uploader("Upload winners (.csv or .txt)", type=["csv","txt"])
 
-    st.header("3) Run controls")
-    run_clicked = st.button("▶️ Run analysis")
+# 2) File order
+st.sidebar.header("2) File order")
+order_mode = st.sidebar.radio("Row order in file:",
+                              options=["Auto (guess)","Newest first","Oldest first"],
+                              index=0,
+                              help="This is the chronological order you want to analyze in.")
+order_map = {"Auto (guess)":"auto","Newest first":"newest","Oldest first":"oldest"}
+order_mode = order_map[order_mode]
 
-    st.header("4) Hot/Cold/Due params")
-    window = st.number_input("Window (trailing draws) for hot/cold ranking (0 = all)",
-                             min_value=0, max_value=2000, value=10, step=1)
-    pct_hot = st.slider("% of digits labeled Hot (by frequency)", 0, 50, 30)
-    pct_cold = st.slider("% of digits labeled Cold (by frequency)", 0, 50, 30)
-    due_threshold = st.number_input("Due threshold: 'not seen in last N draws'",
-                                    min_value=0, max_value=200, value=2, step=1)
+# 3) Run controls
+st.sidebar.header("3) Run controls")
+run_clicked = st.sidebar.button("▶️ Run analysis (top)", type="primary")
 
-    st.header("5) Export control")
-    export_prefix = st.text_input("Export file prefix", value="dc5_analysis")
+# 4) Hot/Cold/Due params
+st.sidebar.header("4) Hot/Cold/Due params")
+window = int(st.sidebar.number_input("Window (trailing draws) for hot/cold ranking (0 = all)", min_value=0, max_value=2000, value=10, step=1))
+pct_hot = int(st.sidebar.slider("% of digits labeled Hot (by frequency)", min_value=10, max_value=50, value=30, step=5))
+pct_cold = int(st.sidebar.slider("% of digits labeled Cold (by frequency)", min_value=10, max_value=50, value=30, step=5))
+due_lookback = int(st.sidebar.number_input("Due threshold: 'not seen in last N draws'", min_value=1, max_value=20, value=2, step=1))
 
-params = Params(int(window), int(pct_hot), int(pct_cold), int(due_threshold))
+# 5) Export control
+st.sidebar.header("5) Export control")
+export_prefix = st.sidebar.text_input("Export file prefix", value="dc5_analysis")
 
-info_box = st.empty()
-quick_box = st.empty()
-table_placeholder = st.empty()
-sum_header = st.markdown("### Summary")
-summary_json = st.empty()
-dist_cols = st.columns(3)
-dist_more_cols = st.columns(2)
-export_cols = st.columns(2)
+# --- main controls ---
+st.subheader("Run")
+run_top = st.button("▶️ Run analysis (top)", type="primary")
 
-if uploaded is None:
-    st.info("Upload a winners file and click **Run analysis**.")
-else:
-    try:
-        uploaded.seek(0)
-        winners_raw = parse_uploaded_file(uploaded)
-        info_box.info(f"Parsed: **{len(winners_raw)}** winners found "
-                      f"(accepts 5-digit like `00458` and hyphenated `0-0-4-5-8`).")
+run_now = run_clicked or run_top
 
-        # order handling
-        guessed = detect_order(winners_raw)
-        chosen = order_choice if order_choice != "Auto (guess)" else guessed
-        winners = winners_raw[:] if chosen == "Newest first" else winners_raw[::-1]
-        old_to_new = winners[::-1] if chosen == "Newest first" else winners[:]
+if not up:
+    st.info("Upload a .csv or .txt file of winners to begin.")
+    st.stop()
 
-        if run_clicked:
-            df, summary, dist_tables, ordered_digits = analyze(old_to_new, params)
+with st.spinner("Reading file…"):
+    df = parse_uploaded(up)
 
-            quick_box.markdown(f"### Hottest → coldest (quick view)\n\n`{', '.join(ordered_digits)}`")
+st.caption(f"Parsed: **{len(df)} winners** found in the file. (We accept both 5-digit forms like `00458` and hyphenated `0-0-4-5-8`.)")
 
-            if df.empty:
-                table_placeholder.warning("No winners parsed from the file.")
-            else:
-                table_placeholder.dataframe(df, use_container_width=True)
+# file order
+df = order_rows(df, order_mode)
 
-                # Expanded summary (no '{ ... }' collapse)
-                summary_json.json(summary, expanded=True)
+# quick view: hottest → coldest for current parameters
+hottest, heat_rank, cold_rank, HOT, COLD, NEUTRAL = rank_hot_cold(df, window, pct_hot, pct_cold)
+st.markdown("### Hottest → coldest (quick view)")
+st.code(", ".join(hottest))
 
-                # Distributions
-                with dist_cols[0]:
-                    st.markdown("**Hot hits**"); st.dataframe(dist_tables["hot_hits_dist"])
-                with dist_cols[1]:
-                    st.markdown("**Cold hits**"); st.dataframe(dist_tables["cold_hits_dist"])
-                with dist_cols[2]:
-                    st.markdown("**Due hits**"); st.dataframe(dist_tables["due_hits_dist"])
-                with dist_more_cols[0]:
-                    st.markdown("**Neutral hits**"); st.dataframe(dist_tables["neutral_hits_dist"])
-                with dist_more_cols[1]:
-                    st.markdown("**Hot ∩ Due hits**"); st.dataframe(dist_tables["hot_and_due_hits_dist"])
+# Guard against accidental re-runs:
+if not run_now:
+    st.warning("Press **Run analysis** to compute composition tables and schematics. (This page won’t auto-refresh.)")
+    st.stop()
 
-                # Exports (no auto-refresh)
-                csv_bytes = df.to_csv(index=False).encode("utf-8")
-                txt_buf = io.StringIO()
-                txt_buf.write("DC5 Hot/Cold/Due Analyzer Results\n")
-                txt_buf.write(f"Total winners: {summary['n_winners']}\n")
-                txt_buf.write(f"Window for hot/cold: {summary['window_for_hotcold']}\n")
-                txt_buf.write(f"% Hot: {summary['pct_hot']} | % Cold: {summary['pct_cold']}\n")
-                txt_buf.write(f"Due threshold: last {summary['due_threshold']} draws\n\n")
-                txt_buf.write("Hottest→Coldest: " + ", ".join(ordered_digits) + "\n\n")
-                for k, v in summary["means"].items():
-                    txt_buf.write(f"mean_{k}: {v}\n")
+# ------------------------------
+# Compute per-winner table + schematics
+# ------------------------------
+with st.spinner("Computing per-winner composition & schematics…"):
+    per_tbl, meta = per_winner_rows(df, window, pct_hot, pct_cold, due_lookback)
 
-                with export_cols[0]:
-                    st.download_button("Download per-winner CSV",
-                        data=csv_bytes,
-                        file_name=f"{export_prefix}_per_winner.csv",
-                        mime="text/csv",
-                        use_container_width=True)
-                with export_cols[1]:
-                    st.download_button("Download TXT summary",
-                        data=txt_buf.getvalue().encode("utf-8"),
-                        file_name=f"{export_prefix}_summary.txt",
-                        mime="text/plain",
-                        use_container_width=True)
+st.markdown("### Pattern summaries (BOX, order-invariant)")
+# Show counts table first rows
+st.dataframe(per_tbl[["idx","winner","hot_hits","cold_hits","due_hits","neutral_hits","schematic_box"]].head(50),
+             use_container_width=True, hide_index=True)
 
-    except Exception as e:
-        st.error(f"Failed to read file: {e}")
+# Schematic frequencies
+freq = meta["schematic_freq"]
+st.markdown("#### Top schematics")
+st.dataframe(freq.head(50), use_container_width=True, hide_index=True)
+
+# ------------------------------
+# Exports
+# ------------------------------
+st.markdown("### Export")
+
+# CSV: per-winner table
+csv_buf = io.StringIO()
+per_tbl.to_csv(csv_buf, index=False)
+st.download_button(
+    label="Download per-winner CSV",
+    data=csv_buf.getvalue().encode("utf-8"),
+    file_name=f"{export_prefix}_per_winner.csv",
+    mime="text/csv",
+)
+
+# TXT: human summary
+txt_data = to_txt_summary(meta, per_tbl)
+st.download_button(
+    label="Download TXT summary",
+    data=txt_data.encode("utf-8"),
+    file_name=f"{export_prefix}_summary.txt",
+    mime="text/plain",
+)
+
+# Collapsible JSON summary (for debugging)
+with st.expander("Summary (JSON)"):
+    st.json({
+        "params": meta["params"],
+        "hottest_to_coldest": meta["hottest_to_coldest"],
+        "totals": meta["totals"]
+    })
