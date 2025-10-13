@@ -127,7 +127,6 @@ def _load_file(file_bytes: bytes, filename: str) -> pd.DataFrame:
                 candidate = col
                 break
         if candidate is None:
-            # fall back: use first column string
             candidate = df.columns[0]
         df["raw"] = df[candidate].astype(str)
     else:
@@ -147,7 +146,6 @@ def _guess_order(df: pd.DataFrame) -> str:
       - Else default to 'Newest first' (many DC-5 files list most recent first).
     Returns one of: 'Newest first', 'Oldest first'
     """
-    # Heuristic: check for a date-like column
     for col in df.columns:
         if col == "raw":
             continue
@@ -174,29 +172,20 @@ def _annotate_tags_over_history(
     due_n: int,
 ) -> Tuple[pd.DataFrame, List[int]]:
     """
-    For each winner i, compute tag sets using the PRIOR `window` draws (i.e., true predictive mode),
+    For each winner i, compute tag sets using the PRIOR `window` draws (true predictive mode),
     then annotate row i with list-like columns: hot, cold, due, neutral.
-
-    winners: list ordered according to 'order_choice' (index 0 is the newest or oldest based on choice).
-    We transform internally to chronological = oldest → newest to compute priors naturally.
     """
-    # Convert ordering to chronological oldest->newest
-    # If input is newest->oldest, reverse
-    # We'll preserve original index mapping at the end
-    chronological = winners[:]  # assume already oldest->newest; caller manages
+    chronological = winners[:]  # caller ensures oldest→newest
     n = len(chronological)
 
     rows = []
-    # Precompute prefix windows for speed (optional—simple slicing is okay)
     for i in range(n):
         prior = chronological[max(0, i - window): i] if window > 0 else chronological[:i]
-        # frequencies in prior
         freq = _freq_of_window(prior) if len(prior) > 0 else np.zeros(10, dtype=int)
         hot, cold = _rank_hot_cold(freq, hot_pct, cold_pct)
         due = _compute_due(prior, due_n)
         tagset = set(hot) | set(cold) | set(due)
         neutral = [d for d in range(10) if d not in tagset]
-
         rows.append({
             "digits": chronological[i],
             "hot": hot,
@@ -208,7 +197,7 @@ def _annotate_tags_over_history(
     per = pd.DataFrame(rows)
     _ensure_tag_columns(per)
 
-    # Hottest→coldest quick view = based on last `window` draws of the FULL series (most recent window)
+    # Quick hottest→coldest based on most recent window
     prior_for_quick = chronological[-window:] if window > 0 else chronological
     freq_quick = _freq_of_window(prior_for_quick)
     order_desc = list(np.argsort(-freq_quick))
@@ -226,22 +215,16 @@ def _compute_analysis(
     cold_pct: int,
     due_n: int,
 ) -> Dict[str, Any]:
-    """
-    Full compute: order the data, annotate per-winner tags, build summaries, and exports.
-    """
-
-    # Decide chronological order
+    """Full compute: order data, annotate per-winner tags, build summaries, and exports."""
     if order_choice == "Auto (guess)":
         order_choice = _guess_order(df_loaded)
 
     if order_choice == "Newest first":
-        # convert to chronological oldest->newest
         ordered = df_loaded.iloc[::-1].reset_index(drop=True)
     else:
-        # already oldest->newest
         ordered = df_loaded.copy()
 
-    winners = ordered["digits"].tolist()  # list of lists (each length=5)
+    winners = ordered["digits"].tolist()
 
     per_winner, hottest_desc_order = _annotate_tags_over_history(
         winners=winners,
@@ -251,28 +234,23 @@ def _compute_analysis(
         due_n=due_n,
     )
 
-    # Composition counts (how many of winner digits fell into each tag computed from priors)
     per_winner["hot_hits"]     = composition_counts(per_winner, "hot")
     per_winner["cold_hits"]    = composition_counts(per_winner, "cold")
     per_winner["due_hits"]     = composition_counts(per_winner, "due")
     per_winner["neutral_hits"] = composition_counts(per_winner, "neutral")
 
-    # Summary
     summary_tbl = (
         per_winner[["hot_hits", "cold_hits", "due_hits", "neutral_hits"]]
         .describe()
         .round(3)
     )
 
-    # Hottest→coldest quick text
     hottest_display = ", ".join(map(str, hottest_desc_order))
 
-    # Nice CSV output: expand list columns as comma-joined strings
     csv_df = per_winner.copy()
     for col in ("digits", "hot", "cold", "due", "neutral"):
         if col in csv_df.columns:
             csv_df[col] = csv_df[col].apply(lambda x: ",".join(map(str, x)) if isinstance(x, (list, tuple)) else "")
-
     csv_bytes = csv_df.to_csv(index=False).encode()
 
     txt_parts = []
@@ -283,7 +261,7 @@ def _compute_analysis(
     txt_bytes = "\n".join(txt_parts).encode()
 
     return {
-        "per_winner": per_winner,          # raw annotated frame
+        "per_winner": per_winner,
         "csv_bytes": csv_bytes,
         "txt_bytes": txt_bytes,
         "summary_tbl": summary_tbl,
@@ -316,13 +294,13 @@ with st.sidebar:
         export_prefix = st.text_input("Export file prefix", value="dc5_analysis")
         run_clicked = st.form_submit_button("▶️ Run analysis")
 
-# space for main outputs
+# keep results and loaded df stable between interactions (avoid auto refresh on download)
 if "results" not in st.session_state:
     st.session_state["results"] = None
 if "loaded_df" not in st.session_state:
     st.session_state["loaded_df"] = None
 
-# Load file (cached) when user uploads it
+# Load file (cached)
 if up is not None:
     try:
         st.session_state["loaded_df"] = _load_file(up.getvalue(), up.name)
