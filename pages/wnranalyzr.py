@@ -320,6 +320,10 @@ due_lookback = int(st.sidebar.number_input("Due threshold: 'not seen in last N d
 st.sidebar.header("5) Insights")
 min_support = int(st.sidebar.slider("Insights threshold (≥ this %)", min_value=50, max_value=100, value=70, step=1))
 
+# 5.5) Display
+st.sidebar.header("5.5) Display")
+rows_to_show = int(st.sidebar.number_input("Max rows to display (0 = all)", min_value=0, max_value=5000, value=200, step=50))
+
 # 6) Export control
 st.sidebar.header("6) Export control")
 export_prefix = st.sidebar.text_input("Export file prefix", value="dc5_analysis")
@@ -359,12 +363,18 @@ with st.spinner("Computing per-winner composition & schematics…"):
     per_tbl, meta = per_winner_rows(df, window, pct_hot, pct_cold, due_lookback)
 
 st.markdown("### Pattern summaries (BOX, order-invariant)")
-st.dataframe(per_tbl[["idx","winner","hot_hits","cold_hits","due_hits","neutral_hits","schematic_box"]].head(50),
-             use_container_width=True, hide_index=True)
+_cols = ["idx","winner","hot_hits","cold_hits","due_hits","neutral_hits","schematic_box"]
+display_df = per_tbl[_cols].copy()
+if rows_to_show > 0:
+    display_df = display_df.head(rows_to_show)
+st.dataframe(display_df, use_container_width=True, hide_index=True)
 
 freq = meta["schematic_freq"]
 st.markdown("#### Top schematics")
-st.dataframe(freq.head(50), use_container_width=True, hide_index=True)
+freq_display = freq.copy()
+if rows_to_show > 0:
+    freq_display = freq_display.head(rows_to_show)
+st.dataframe(freq_display, use_container_width=True, hide_index=True)
 
 # ------------------------------
 # Auto‑Insights (≥ threshold)
