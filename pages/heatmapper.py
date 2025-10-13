@@ -19,6 +19,14 @@ from typing import List, Dict, Optional, Tuple
 import pandas as pd
 import streamlit as st
 
+# --- Session state for stable interactions (prevents reset on clicks) ---
+if "generated" not in st.session_state:
+    st.session_state.generated = False
+if "straight_set" not in st.session_state:
+    st.session_state.straight_set = set()
+if "best_map" not in st.session_state:
+    st.session_state.best_map = {}
+
 DIGITS = list("0123456789")
 LETTERS = list("ABCDEFGHIJ")  # A..J
 
@@ -304,9 +312,20 @@ if not schemas:
     st.warning("Select at least one schema to generate combos.")
     st.stop()
 
-# Generate
-run_it = st.button("Run generator")
-if not run_it:
+# Controls — use a form so clicking other widgets won't reset generation
+with st.form("run_form", clear_on_submit=False):
+    generate_clicked = st.form_submit_button("Run generator")
+reset_clicked = st.button("Reset session")
+
+if reset_clicked:
+    st.session_state.generated = False
+    st.session_state.straight_set = set()
+    st.session_state.best_map = {}
+
+if generate_clicked:
+    st.session_state.generated = True
+
+if not st.session_state.generated:
     st.info("Enter winners then click **Run generator** to build combos.")
     st.stop()
 
