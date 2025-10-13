@@ -220,6 +220,83 @@ top_df = pd.DataFrame([(s, c, round(c/len(schem_df)*100, 2)) for s, c in top_sch
 
 st.markdown("### Top Schemas")
 st.dataframe(top_df, use_container_width=True, hide_index=True)
+# ---------------------------
+# ≥70% Pass-Rate Filters (from your 200-winner study)
+# ---------------------------
+st.markdown("## ≥70% Pass-Rate Filters")
+
+def _base_class(t: str) -> str:
+    b = t.split("&D")[0]
+    if b.startswith("H"): return "H"
+    if b.startswith("C"): return "C"
+    return "N"
+
+def _due_rank(t: str):
+    m = re.search(r"&D(\d+)", t)
+    return int(m.group(1)) if m else None
+
+def _is_due(t: str) -> bool:
+    return "&D" in t
+
+# Filters (defaults ON, in the order we validated ≥70% on your dataset)
+colf1, colf2 = st.columns(2)
+with colf1:
+    f_cold_any = st.checkbox("Contains ≥1 Cold (any C*)", value=True)
+    f_neutral_any = st.checkbox("Contains ≥1 Neutral (N or N&Dx)", value=True)
+    f_due_any = st.checkbox("Contains ≥1 Due (any &Dx)", value=True)
+    f_c1 = st.checkbox("Contains C1 (with/without Due)", value=True)
+    f_hot_any = st.checkbox("Contains ≥1 Hot (any H*)", value=True)
+with colf2:
+    f_cold_le2 = st.checkbox("Cold ≤ 2", value=True)
+    f_neutral_plain = st.checkbox("Contains ≥1 Neutral (plain N)", value=True)
+    f_h1 = st.checkbox("Contains H1 (with/without Due)", value=True)
+    f_d1_or_d2 = st.checkbox("Contains D1 or D2", value=True)
+
+selected_filters = [
+    ("C_any", f_cold_any),
+    ("N_any", f_neutral_any),
+    ("D_any", f_due_any),
+    ("C1", f_c1),
+    ("H_any", f_hot_any),
+    ("C_le2", f_cold_le2),
+    ("N_plain", f_neutral_plain),
+    ("H1", f_h1),
+    ("D1_or_D2", f_d1_or_d2),
+]
+active = [key for key, on in selected_filters if on]
+
+# Apply to current slice
+survivor_rows = []
+for _, r in schem_df.iterrows():
+    toks = r['tokens']
+    nC = sum(1 for t in toks if _base_class(t) == "C")
+    nH = sum(1 for t in toks if _base_class(t) == "H")
+    nN = sum(1 for t in toks if _base_class(t) == "N")
+    conds = {
+        "C_any": (nC >= 1),
+        "N_any": (nN >= 1),
+        "D_any": any(_is_due(t) for t in toks),
+        "C1": any(t.startswith("C1") for t in toks),
+        "H_any": (nH >= 1),
+        "C_le2": (nC <= 2),
+        "N_plain": any((_base_class(t) == "N" and not _is_due(t)) for t in toks),
+        "H1": any(t.startswith("H1") for t in toks),
+        "D1_or_D2": any((_is_due(t) and (_due_rank(t) in (1, 2))) for t in toks),
+    }
+    if all(conds[k] for k in active):
+        survivor_rows.append(r)
+
+survivor_count = len(survivor_rows)
+
+a, b = st.columns([1, 3])
+with a:
+    st.metric("Survivors (pass all checked)", survivor_count)
+with b:
+    if survivor_count:
+        st.caption("Preview of survivors")
+        st.dataframe(pd.DataFrame(survivor_rows)[['idx', 'winner', 'schema']], use_container_width=True, hide_index=True)
+    else:
+        st.info("No winners pass the currently selected ≥70% filters.")
 
 # External schema list (optional) — normalize into a set of strings to compare
 external_schemas_set = set()
