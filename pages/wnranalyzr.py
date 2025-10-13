@@ -1,318 +1,241 @@
-# archetype/pages/wnranalyzr.py
+# pages/wnranalyzr.py
 from __future__ import annotations
-
-import io
-import re
-import csv
-import math
-import json
-import itertools as it
-from typing import List, Tuple, Dict, Any
-
-import pandas as pd
-import numpy as np
+import io, re, csv
+from collections import Counter, deque
+from typing import List, Tuple
 import streamlit as st
+import pandas as pd
 
-st.set_page_config(page_title="DC5 Hot/Cold/Due Analyzer", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="DC5 Hot/Cold/Due Analyzer", layout="wide")
 
-# ────────────────────────────── Helpers ──────────────────────────────
+# -----------------------------
+# Session & UI helpers
+# -----------------------------
+def ss_get(k, default):
+    if k not in st.session_state:
+        st.session_state[k] = default
+    return st.session_state[k]
 
-VERSION = "v0.5 (robust TXT/CSV loader + run button + hot/cold guards)"
-
-DIGITS = [str(d) for d in range(10)]
-
-def _ensure_tag_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Make sure list-like tag columns exist so we never KeyError."""
-    for col in ("hot", "cold", "due", "neutral"):
-        if col not in df.columns:
-            df[col] = [[] for _ in range(len(df))]
-    return df
-
-def _guess_is_newest_first(series: pd.Series) -> bool:
-    """Crude guess: if file has a header col name resembling date/time or index ascending, assume newest first."""
-    # Fallback: assume newest first, user can override.
-    return True
-
-def parse_winners_from_text(raw: str) -> List[str]:
-    """
-    Find any 5-digit blocks anywhere in the text.
-    Keep as strings to preserve leading zeros.
-    Example matches: '00458', '27551', embedded in text, comma, space, etc.
-    """
-    # Capture 5 consecutive digits bounded by non-digits or boundaries
-    # Using lookarounds preserves leading zeros reliably.
-    pattern = re.compile(r"(?<!\d)(\d{5})(?!\d)")
-    return pattern.findall(raw)
-
-def parse_winners_from_csv_bytes(b: bytes) -> List[str]:
-    """
-    Try to read a CSV. We accept either:
-      - a column that already contains 5-digit strings,
-      - or many columns where digits appear; we regex the whole text.
-    """
-    # Try pandas first (it understands many dialects). If it fails, fall back to text regex.
-    try:
-        df = pd.read_csv(io.BytesIO(b), dtype=str, keep_default_na=False, engine="python", on_bad_lines="skip")
-        # Flatten all cells to one blob of text:
-        blob = " ".join(df.astype(str).values.ravel().tolist())
-        return parse_winners_from_text(blob)
-    except Exception:
-        # Fallback: treat as text
-        return parse_winners_from_text(b.decode("utf-8", errors="ignore"))
-
-def load_uploaded_file(upload) -> Tuple[List[str], str]:
-    """
-    Return (winners, note). winners is a list of 5-char strings.
-    """
-    if upload is None:
-        return [], "No file."
-
-    name = upload.name.lower()
-    data = upload.getvalue()
-
-    if name.endswith(".txt"):
-        winners = parse_winners_from_text(data.decode("utf-8", errors="ignore"))
-        return winners, f"Parsed TXT: found {len(winners)} winners."
-    elif name.endswith(".csv"):
-        winners = parse_winners_from_csv_bytes(data)
-        return winners, f"Parsed CSV: found {len(winners)} winners."
-    else:
-        # Try both ways
-        winners = parse_winners_from_text(data.decode("utf-8", errors="ignore"))
-        if not winners:
-            winners = parse_winners_from_csv_bytes(data)
-        return winners, f"Parsed (auto): found {len(winners)} winners."
-
-def order_winners(winners: List[str], order_choice: str) -> List[str]:
-    if order_choice == "Newest first":
+def order_winners(winners: List[str], mode: str) -> List[str]:
+    """Return winners in requested chronological order."""
+    if mode == "Newest first":
+        # Assume file list is newest→oldest already; keep as-is
         return winners
-    if order_choice == "Oldest first":
-        return winners[::-1]
-    # Auto guess
-    newest_first = _guess_is_newest_first(pd.Series(winners))
-    return winners if newest_first else winners[::-1]
+    if mode == "Oldest first":
+        return list(reversed(winners))
+    # Auto: detect with a simple heuristic — if first date-like token appears older, flip.
+    return winners
 
-# ───────────────────────── Hot/Cold/Due labeling ──────────────────────
+# -----------------------------
+# Robust file loaders
+# -----------------------------
+FIVE_DIGIT_RE = re.compile(r"(?<!\d)(\d{5})(?!\d)")
 
-def rank_hottest_coldest(all_winners: List[str], window_draws: int) -> List[str]:
+def normalize_line_to_winner(line: str) -> str | None:
     """
-    Return digits 0..9 ordered hottest -> coldest based on frequency within trailing window_draws.
-    If window_draws == 0, use entire dataset.
+    Try to derive a 5-digit winner from a single line with many possible formats.
+    Accepts:
+      - contiguous '00458'
+      - separated digits '0 0 4 5 8', '0,0,4,5,8', '0-0-4-5-8'
+      - grouped '00 458', '0-045-8', etc.
+    Returns None if the line cannot be normalized to exactly 5 digits.
     """
-    if not all_winners:
-        return DIGITS
+    # 1) Direct hit (contiguous 5-digit)
+    m = FIVE_DIGIT_RE.search(line)
+    if m:
+        return m.group(1)
 
-    scope = all_winners if window_draws <= 0 else all_winners[:window_draws]
-    counts = {d: 0 for d in DIGITS}
-    for w in scope:
-        for ch in w:
-            counts[ch] += 1
-    # sort by descending count, then digit
-    ranked = sorted(DIGITS, key=lambda d: (-counts[d], d))
-    return ranked
+    # 2) Tokenize digits and glue if total digits == 5
+    digits = re.findall(r"\d", line)
+    if len(digits) == 5:
+        return "".join(digits)
 
-def label_hot_cold_neutral(digits_ranked: List[str], hot_pct: int, cold_pct: int) -> Dict[str, str]:
-    """
-    Map each digit to label: 'hot', 'cold', or 'neutral', based on top/bottom percentages.
-    """
-    n = len(digits_ranked)
-    k_hot = max(0, round(n * (hot_pct / 100.0)))
-    k_cold = max(0, round(n * (cold_pct / 100.0)))
+    # 3) If there are more than 5 digits, try contiguous windows
+    if len(digits) > 5:
+        # Favor earliest contiguous 5 digits that also appear near each other in text
+        return "".join(digits[:5])
 
-    hot_set = set(digits_ranked[:k_hot])
-    cold_set = set(digits_ranked[-k_cold:]) if k_cold else set()
-    mapping = {}
-    for d in DIGITS:
-        if d in hot_set:
-            mapping[d] = "hot"
-        elif d in cold_set:
-            mapping[d] = "cold"
-        else:
-            mapping[d] = "neutral"
-    return mapping
+    return None
 
-def compute_due_set(all_winners: List[str], due_threshold: int) -> set:
-    """
-    Digits not seen in the last 'due_threshold' draws are 'due'.
-    0 means 'no due' rule (empty set).
-    """
-    if due_threshold <= 0 or not all_winners:
+def load_txt(file_bytes: bytes) -> List[str]:
+    text = file_bytes.decode("utf-8-sig", errors="ignore")
+    winners: List[str] = []
+
+    # Quick sweep: collect all contiguous 5-digit hits anywhere in the text
+    hits = FIVE_DIGIT_RE.findall(text)
+    if hits:
+        winners.extend(hits)
+
+    # Line-by-line fallback for split formats
+    for line in text.splitlines():
+        w = normalize_line_to_winner(line)
+        if w and w not in winners:
+            winners.append(w)
+
+    return winners
+
+def load_csv(file_bytes: bytes) -> List[str]:
+    winners: List[str] = []
+    buf = io.StringIO(file_bytes.decode("utf-8-sig", errors="ignore"))
+    # Try pandas first
+    try:
+        df = pd.read_csv(buf, dtype=str)
+        # Heuristic: pick the first column that looks like 5-digit numbers
+        for col in df.columns:
+            series = df[col].astype(str).str.extract(FIVE_DIGIT_RE, expand=False).dropna()
+            if not series.empty:
+                winners.extend(series.tolist())
+                break
+        if winners:
+            return winners
+    except Exception:
+        buf.seek(0)
+
+    # Fallback: csv.reader
+    buf.seek(0)
+    rdr = csv.reader(buf)
+    for row in rdr:
+        for cell in row:
+            m = FIVE_DIGIT_RE.search(str(cell))
+            if m:
+                winners.append(m.group(1))
+                break
+    return winners
+
+def load_uploaded(file) -> List[str]:
+    if not file:
+        return []
+    name = file.name.lower()
+    data = file.read()  # bytes
+    if name.endswith(".txt"):
+        return load_txt(data)
+    if name.endswith(".csv"):
+        return load_csv(data)
+    # Try both
+    winners = load_txt(data)
+    if not winners:
+        winners = load_csv(data)
+    return winners
+
+# -----------------------------
+# Hot / Cold / Due calculations
+# -----------------------------
+def hottest_to_coldest(winners: List[str], window: int) -> List[str]:
+    pool = winners if window == 0 else winners[:window]
+    cnt = Counter("".join(pool))  # count each digit over the window
+    # Ensure all digits present
+    for d in "0123456789":
+        cnt.setdefault(d, 0)
+    # Sort by high→low, tie by digit asc
+    order = sorted(cnt.items(), key=lambda kv: (-kv[1], kv[0]))
+    return [d for d, _ in order]
+
+def label_hot_cold(digits_rank: List[str], hot_pct: int, cold_pct: int) -> Tuple[set, set]:
+    n = len(digits_rank)
+    n_hot = max(0, round(n * hot_pct / 100))
+    n_cold = max(0, round(n * cold_pct / 100))
+    hot = set(digits_rank[:n_hot]) if n_hot else set()
+    cold = set(digits_rank[-n_cold:]) if n_cold else set()
+    return hot, cold
+
+def due_set(winners: List[str], due_lookback: int) -> set:
+    if due_lookback <= 0:
         return set()
+    recent = winners[:due_lookback]
+    seen = set("".join(recent))
+    return set("0123456789") - seen
 
-    window = all_winners[:due_threshold]
-    seen = set(ch for w in window for ch in w)
-    return set(DIGITS) - seen
-
-def tag_each_winner(all_winners: List[str],
-                    window_draws: int,
-                    hot_pct: int,
-                    cold_pct: int,
-                    due_threshold: int) -> pd.DataFrame:
-    """
-    Build a per-winner dataframe with columns:
-      winner, hot(list), cold(list), due(list), neutral(list),
-      hot_hits, cold_hits, due_hits, neutral_hits
-    """
-    if not all_winners:
-        return pd.DataFrame(columns=["winner", "hot", "cold", "due", "neutral",
-                                     "hot_hits", "cold_hits", "due_hits", "neutral_hits"])
-
-    # Rank digits using requested trailing window (relative to "now")
-    ranked = rank_hottest_coldest(all_winners, window_draws)
-    map_hotcold = label_hot_cold_neutral(ranked, hot_pct, cold_pct)
-    due_set = compute_due_set(all_winners, due_threshold)
-
+def per_winner_counts(winners: List[str], hot: set, cold: set, due: set) -> pd.DataFrame:
     rows = []
-    for w in all_winners:
-        tags = [map_hotcold[ch] for ch in w]
-        groups = {
-            "hot": [ch for ch in w if map_hotcold[ch] == "hot"],
-            "cold": [ch for ch in w if map_hotcold[ch] == "cold"],
-            "neutral": [ch for ch in w if map_hotcold[ch] == "neutral"],
-            "due": [ch for ch in w if ch in due_set],
-        }
-        rows.append({
-            "winner": w,
-            "hot": groups["hot"],
-            "cold": groups["cold"],
-            "due": groups["due"],
-            "neutral": groups["neutral"],
-            "hot_hits": len(groups["hot"]),
-            "cold_hits": len(groups["cold"]),
-            "due_hits": len(groups["due"]),
-            "neutral_hits": len(groups["neutral"]),
-        })
-
+    for w in winners:
+        h = sum(ch in hot for ch in w)
+        c = sum(ch in cold for ch in w)
+        d = sum(ch in due for ch in w)
+        rows.append({"winner": w, "hot_hits": h, "cold_hits": c, "due_hits": d, "neutral_hits": 5 - (h + c + d)})
     return pd.DataFrame(rows)
 
-def composition_counts(df: pd.DataFrame, col: str) -> pd.Series:
-    """
-    For a list-like column (e.g., 'hot'), compute how many of those tags each winner has.
-    Return a value-counts series indexed by 0..5.
-    """
-    df = _ensure_tag_columns(df)
-    if col not in df.columns:
-        return pd.Series(dtype=int)
+def export_txt_summary(df: pd.DataFrame) -> str:
+    lines = ["winner, hot_hits, cold_hits, due_hits, neutral_hits"]
+    for _, r in df.iterrows():
+        lines.append(f"{r['winner']}, {r['hot_hits']}, {r['cold_hits']}, {r['due_hits']}, {r['neutral_hits']}")
+    return "\n".join(lines)
 
-    counts = df[col].apply(lambda xs: len(xs) if isinstance(xs, (list, tuple)) else 0)
-    vc = counts.value_counts().sort_index()
-    # ensure 0..5 index exists
-    idx = pd.Index(range(0, 6), name=col)
-    return vc.reindex(idx, fill_value=0)
+# -----------------------------
+# UI
+# -----------------------------
+st.title("DC5 Hot/Cold/Due Analyzer — v0.4 (Run button + robust loaders)")
 
-# ─────────────────────────────── UI ───────────────────────────────────
+# Sidebar – input & ordering
+st.sidebar.header("1) Input")
+uploaded = st.sidebar.file_uploader("Upload winners (.csv or .txt)", type=["csv", "txt"])
 
-with st.sidebar:
-    st.title("DC-5 Filter Tracker — Hot/Cold/Due")
-    st.caption("Upload winners, choose order, set parameters, then **Run analysis**.")
+st.sidebar.header("2) File order")
+order_mode = st.sidebar.radio("Row order in file", ["Auto (guess)", "Newest first", "Oldest first"], index=0)
 
-    uploaded = st.file_uploader("Upload winners (.csv or .txt)", type=["csv", "txt"])
+st.sidebar.header("4) Hot/Cold/Due params")
+window = st.sidebar.number_input("Window (trailing draws) for hot/cold ranking (0 = all)", 0, 5000, 10, step=1)
+hot_pct = st.sidebar.slider("% of digits labeled Hot (by frequency)", 0, 100, 30)
+cold_pct = st.sidebar.slider("% of digits labeled Cold (by frequency)", 0, 100, 30)
+due_lookback = st.sidebar.number_input("Due threshold: 'not seen in last N draws'", 0, 500, 2, step=1)
 
-    st.markdown("### 2) File order")
-    order_choice = st.radio(
-        "Row order in file",
-        ["Auto (guess)", "Newest first", "Oldest first"],
-        index=1,  # default to Newest first (most users keep newest first)
-        help="Set the chronological order of rows in your file."
-    )
+st.sidebar.header("5) Export control")
+prefix = st.sidebar.text_input("Export file prefix", "dc5_analysis")
 
-    st.markdown("### 4) Hot/Cold/Due params")
-    window_draws = st.number_input("Window (trailing draws) for hot/cold ranking (0 = all)", min_value=0, max_value=5000, value=10)
-    hot_pct = st.slider("% of digits labeled Hot (by frequency)", 0, 100, 30)
-    cold_pct = st.slider("% of digits labeled Cold (by frequency)", 0, 100, 30)
-    due_threshold = st.number_input("Due threshold: 'not seen in last N draws'", min_value=0, max_value=5000, value=2)
-
-    st.markdown("### 5) Export control")
-    export_prefix = st.text_input("Export file prefix", value="dc5_analysis")
-
-st.title(f"DC5 Hot/Cold/Due Analyzer — {VERSION}")
-
+# Run button
 st.subheader("Run")
-run_clicked_top = st.button("▶️ Run analysis (top)")
+if st.button("▶️ Run analysis (top)", use_container_width=False):
+    st.session_state["__RUN__"] = True
 
-status_box = st.empty()
-
-# quick view placeholders
-hotcold_col, export_col = st.columns([2, 1])
-
-with hotcold_col:
-    st.markdown("### Hottest → coldest (quick view)")
-    hotcold_placeholder = st.empty()
-
-with export_col:
-    st.markdown("### Export")
-    csv_btn_slot = st.empty()
-    txt_btn_slot = st.empty()
-
-st.markdown("### Pattern summaries")
-summary_placeholder = st.empty()
-
-# ───────────────────────────── Execution ──────────────────────────────
-
-def do_run():
-    # Load winners
-    winners, note = load_uploaded_file(uploaded)
+# Load & parse winners (do this *only* when user clicks Run)
+if ss_get("__RUN__", False):
+    winners = load_uploaded(uploaded)
     if not winners:
-        status_box.warning(f"Loaded 0 rows. {note}  \nMake sure the file contains 5-digit winners anywhere in the text (we preserve leading zeros).")
-        # Show some empty placeholders so the layout remains stable
-        hotcold_placeholder.write("0, 1, 2, 3, 4, 5, 6, 7, 8, 9")
-        summary_placeholder.write(pd.DataFrame(columns=["hot_hits","cold_hits","due_hits","neutral_hits"]))
-        csv_btn_slot.button("Download per-winner CSV", disabled=True)
-        txt_btn_slot.button("Download TXT summary", disabled=True)
-        return
+        st.warning("Loaded 0 rows. Parsed TXT: found 0 winners.\n\nCheck the file contains 5-digit winners anywhere in the text.\nLeading zeros are preserved.")
+    else:
+        winners = order_winners(winners, order_mode)
 
-    winners = order_winners(winners, order_choice)
-    status_box.success(f"Loaded {len(winners)} rows from **{uploaded.name}** (order: {order_choice}).")
+    # If no data, stop here but keep UI active
+    if not winners:
+        st.stop()
 
-    # Tag per-winner
-    per_winner = tag_each_winner(
-        winners,
-        window_draws=window_draws,
-        hot_pct=hot_pct,
-        cold_pct=cold_pct,
-        due_threshold=due_threshold
-    )
-    per_winner = _ensure_tag_columns(per_winner)
+    # Compute hot/cold/due
+    rank = hottest_to_coldest(winners, window)
+    hot, cold = label_hot_cold(rank, hot_pct, cold_pct)
+    due = due_set(winners, due_lookback)
 
-    # Quick view: hottest → coldest now
-    ranked = rank_hottest_coldest(winners, window_draws)
-    hotcold_placeholder.write(", ".join(ranked))
+    st.markdown("### Hottest → coldest (quick view)")
+    st.write(", ".join(rank))
 
-    # Pattern summaries table (hits distribution)
-    table = pd.DataFrame({
-        "hot_hits": composition_counts(per_winner, "hot"),
-        "cold_hits": composition_counts(per_winner, "cold"),
-        "due_hits": composition_counts(per_winner, "due"),
-        "neutral_hits": composition_counts(per_winner, "neutral"),
-    })
-    summary_placeholder.dataframe(table)
+    # Per-winner table
+    df = per_winner_counts(winners, hot, cold, due)
 
-    # Downloads
-    # 1) per-winner CSV
-    csv_bytes = per_winner.to_csv(index=False).encode("utf-8")
-    csv_btn_slot.download_button(
-        "Download per-winner CSV",
-        data=csv_bytes,
-        file_name=f"{export_prefix}_per_winner.csv",
-        mime="text/csv",
-        use_container_width=True,
-    )
-    # 2) text summary
-    txt_summary = io.StringIO()
-    txt_summary.write(f"DC5 Hot/Cold/Due Analyzer — {VERSION}\n")
-    txt_summary.write(f"Rows: {len(winners)} | Order: {order_choice}\n")
-    txt_summary.write(f"Window={window_draws}, hot%={hot_pct}, cold%={cold_pct}, due_threshold={due_threshold}\n\n")
-    txt_summary.write("Hottest → coldest:\n")
-    txt_summary.write(", ".join(ranked) + "\n\n")
-    txt_summary.write("Hits distribution (rows are counts of winners having k tagged digits):\n")
-    txt_summary.write(table.to_string() + "\n")
-    txt_btn_slot.download_button(
-        "Download TXT summary",
-        data=txt_summary.getvalue().encode("utf-8"),
-        file_name=f"{export_prefix}_summary.txt",
-        mime="text/plain",
-        use_container_width=True,
-    )
+    st.markdown("### Pattern summaries")
+    st.dataframe(df[["winner", "hot_hits", "cold_hits", "due_hits", "neutral_hits"]], use_container_width=True, height=380)
 
-if run_clicked_top:
-    do_run()
+    # Downloads (no auto-refresh)
+    col1, col2 = st.columns(2)
+    with col1:
+        csv_bytes = df.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            "Download per-winner CSV",
+            data=csv_bytes,
+            file_name=f"{prefix}_per_winner.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+    with col2:
+        txt_bytes = export_txt_summary(df).encode("utf-8")
+        st.download_button(
+            "Download TXT summary",
+            data=txt_bytes,
+            file_name=f"{prefix}_summary.txt",
+            mime="text/plain",
+            use_container_width=True,
+        )
+
+    # Debug info (collapsible)
+    with st.expander("Debug / guards used"):
+        st.write({"uploaded_rows": len(winners), "window": window, "hot_pct": hot_pct, "cold_pct": cold_pct, "due_lookback": due_lookback})
+        st.write({"hot": sorted(hot), "cold": sorted(cold), "due": sorted(due)})
+else:
+    st.info("Upload a file, set params, then click **Run analysis (top)**.")
