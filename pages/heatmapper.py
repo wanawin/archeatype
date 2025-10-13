@@ -368,5 +368,45 @@ st.download_button(
     mime="text/csv",
 )
 
+# ---------------------------
+# Search Known Winner (Box & Straight)
+# ---------------------------
+st.markdown("## Search for a known winner in generated combos")
+query = st.text_input("Enter a 5-digit combo to search (e.g., 12345)", max_chars=5)
+if query:
+    import re as _re
+    if not _re.fullmatch(r"\d{5}", query):
+        st.error("Please enter exactly 5 digits.")
+    else:
+        straight_hit = query in straight_set
+        box_hit = box_key(query) in best
+        colx, coly = st.columns(2)
+        with colx:
+            st.metric("Straight match present", "Yes" if straight_hit else "No")
+        with coly:
+            st.metric("Box match present", "Yes" if box_hit else "No")
+        if box_hit:
+            st.caption("Representative generated ordering for this box:")
+            st.code(best[box_key(query)][0])
+
+# Bulk search (paste many combos)
+st.markdown("### Bulk search (paste many combos)")
+bulk = st.text_area("Paste combos (whitespace/newline separated)", height=100)
+if bulk:
+    import re as _re
+    tokens = _re.findall(r"\d{5}", bulk)
+    if not tokens:
+        st.warning("No 5-digit combos found in your paste.")
+    else:
+        rows = []
+        for q in tokens:
+            rows.append({
+                "combo": q,
+                "straight": q in straight_set,
+                "box": box_key(q) in best,
+            })
+        dfhits = pd.DataFrame(rows)
+        st.dataframe(dfhits, use_container_width=True, hide_index=True)
+
 # Legend
 st.caption("Legend: A..J are current ranks (A=hottest, J=coldest). Drift ±1 lets each letter borrow neighbors (e.g., E∈{D,E,F}). Anchors require the combo to include at least one adjacent pair/triplet from today's heat order. Due uses the last W draws (default W=2). Box uniqueness is applied.")
