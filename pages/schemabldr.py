@@ -286,4 +286,37 @@ if combo:
         else:
             st.info("This schema did not occur in the analyzed slice.")
 
+# ---------------------------
+# Known Winner Search (Box / Straight)
+# ---------------------------
+st.markdown("## Known Winner Search (Box / Straight)")
+known = st.text_input("Enter a known 5-digit winner to search for", value="", key="known_search")
+search_box = st.checkbox("Search box (orderless match)", value=True)
+search_straight = st.checkbox("Search straight (exact order)", value=False)
+
+if known:
+    if not re.fullmatch(r"[0-9]{5}", known):
+        st.error("Please enter exactly 5 digits (0–9). Example: 27500 or 02750.")
+    else:
+        total = len(df)
+        # Straight search
+        if search_straight:
+            straight_hits = df[df['winner'] == known].copy()
+            st.write(f"**Straight matches:** {len(straight_hits)}/{total} ({(len(straight_hits)/total*100 if total else 0):.2f}%)")
+            if not straight_hits.empty:
+                straight_hits = straight_hits.reset_index().rename(columns={"index":"row_idx"})
+                straight_hits['row_idx'] = straight_hits['row_idx'] + 1
+                st.dataframe(straight_hits[['row_idx','winner']], use_container_width=True, hide_index=True)
+        # Box search (orderless by digits)
+        if search_box:
+            target = "".join(sorted(list(known)))
+            _tmp = df.copy()
+            _tmp['_sorted'] = _tmp['winner'].apply(lambda s: "".join(sorted(list(s))))
+            box_hits = _tmp[_tmp['_sorted'] == target].copy()
+            st.write(f"**Box matches (orderless):** {len(box_hits)}/{total} ({(len(box_hits)/total*100 if total else 0):.2f}%)")
+            if not box_hits.empty:
+                box_hits = box_hits.reset_index().rename(columns={"index":"row_idx"})
+                box_hits['row_idx'] = box_hits['row_idx'] + 1
+                st.dataframe(box_hits[['row_idx','winner']], use_container_width=True, hide_index=True)
+
 st.caption("Notes: H/C are computed from the trailing frequency window you selected; Due is 'not seen in last W draws' ranked by age (D1 most overdue). Neutral carries no rank. Schemas are orderless bags of 5 combined tokens.")
