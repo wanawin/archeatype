@@ -328,6 +328,9 @@ if not all_results:
     st.warning("No combos generated under current settings — relax anchors, drift, or Due requirements.")
     st.stop()
 
+# Build a straight lookup set BEFORE dedupe (for exact-order search)
+straight_set = set(c for c, _ in all_results)
+
 # Combine and dedupe (box‑unique via key) keeping max score
 best: Dict[str, Tuple[str,int]] = {}
 for combo, sc in all_results:
