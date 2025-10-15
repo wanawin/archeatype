@@ -1,294 +1,323 @@
-# big_loser_list_app.py
-# Loser List Batch Explorer — ±1 Neighborhood Method
-import streamlit as st
-import pandas as pd
-import re
-import hashlib
+# pages/Big_Loser_List.py
+import io
+import csv
 from collections import Counter
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Iterable
 
-st.set_page_config(page_title="Loser List Batch Explorer", layout="wide")
+import pandas as pd
+import streamlit as st
+
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Emergency reset (useful if you suspect stale cache/state)
+# Utilities
 # ──────────────────────────────────────────────────────────────────────────────
+
+LETTERS = list("ABCDEFGHIJ")  # A=hot … J=cold
+
+
+def _only_digits(s: str) -> str:
+    """Return only the digits from s."""
+    return "".join(ch for ch in s if ch.isdigit())
+
+
+def _parse_history(file_bytes: bytes, filename: str, pad4: bool) -> List[str]:
+    """
+    Accepts TXT or CSV. Returns a list of 5-char strings (winners) in file order.
+    - One-item-per-line TXT is fine.
+    - CSV: will look for any column that contains digit-like tokens. Headers ignored.
+    - Non-digit tokens are skipped.
+    """
+    text = file_bytes.decode("utf-8", errors="ignore")
+
+    winners: List[str] = []
+
+    # Try CSV first; if sniff fails we'll fall back to line-by-line
+    try:
+        sniffer = csv.Sniffer()
+        dialect = sniffer.sniff(text.splitlines()[0])
+        reader = csv.reader(io.StringIO(text), dialect)
+        rows = list(reader)
+        # If there's a header row, skip it; otherwise just use all rows
+        # We'll collect any digit tokens from each row.
+        for row in rows:
+            for cell in row:
+                token = _only_digits(str(cell))
+                if token:
+                    winners.append(token)
+        if not winners:
+            raise ValueError("No digit tokens in CSV")
+    except Exception:
+        # Not a CSV or no usable tokens → parse by lines
+        for line in text.splitlines():
+            token = _only_digits(line)
+            if token:
+                winners.append(token)
+
+    # Normalize to 4/5-digit; pad 4→5 if requested
+    norm: List[str] = []
+    for tok in winners:
+        if len(tok) == 5:
+            norm.append(tok)
+        elif len(tok) == 4 and pad4:
+            norm.append("0" + tok)
+        elif len(tok) == 4 and not pad4:
+            # keep as-is (still valid for map math; we’ll zero-fill on display)
+            norm.append(tok)
+        else:
+            # Skip outliers (3, 6+ etc.)
+            continue
+
+    # Finally enforce 5-char strings for our output columns
+    norm = [w if len(w) == 5 else w.zfill(5) for w in norm]
+    return norm
+
+
+def _hot_to_cold_map(last_10: Iterable[str]) -> List[int]:
+    """
+    Given the last 10 winners (each 5 chars), return digits 0..9 sorted by
+    frequency (hot→cold). Ties break by digit ascending.
+    """
+    cnt = Counter(int(ch) for w in last_10 for ch in w)
+    # Ensure all digits appear
+    for d in range(10):
+        cnt.setdefault(d, 0)
+    # Sort hot→cold, tie → lower digit first
+    order = sorted(cnt.items(), key=lambda kv: (-kv[1], kv[0]))
+    return [d for d, _ in order]
+
+
+def _letters_for_map(digits_order_hot_to_cold: List[int]) -> dict:
+    """
+    Map each digit to its rank letter A..J (A=hot … J=cold)
+    """
+    return {digit: LETTERS[idx] for idx, digit in enumerate(digits_order_hot_to_cold)}
+
+
+def _core_letters(winner: str, prev_map_letters: dict) -> List[str]:
+    """Letters used by MR winner, on the previous map."""
+    used = {prev_map_letters[int(ch)] for ch in winner}
+    return sorted(used, key=lambda L: LETTERS.index(L))
+
+
+def _plusminus1_union(letters: Iterable[str]) -> List[str]:
+    """Union of ±1 neighborhoods for the given letters (in A..J index space)."""
+    idxs = {LETTERS.index(L) for L in letters}
+    u = set()
+    for i in idxs:
+        for j in (i - 1, i, i + 1):
+            if 0 <= j < 10:
+                u.add(LETTERS[j])
+    return sorted(u, key=lambda L: LETTERS.index(L))
+
+
+def _due_w2(prev1: str, prev2: str) -> List[int]:
+    """Digits NOT present in the previous 2 winners (ascending)."""
+    present = set(int(ch) for s in (prev1, prev2) if s for ch in s)
+    return [d for d in range(10) if d not in present]
+
+
+def _loser_list_0_9_from_curr(curr_hot_to_cold: List[int]) -> str:
+    """Return 10 digits coldest→hottest as a concatenated string."""
+    cold_to_hot = list(reversed(curr_hot_to_cold))
+    return "".join(str(d) for d in cold_to_hot)
+
+
+def _build_batch(winners: List[str]) -> pd.DataFrame:
+    """
+    Build the batch table from an ordered list of winners (oldest→most-recent).
+    Row i uses:
+      - prev map: winners[i-10 : i]  (10 draws before MR winner)
+      - curr map: winners[i-9  : i+1] (MR winner + 9 before → next-draw map)
+      - due_W2:   digits absent from winners[i-2], winners[i-1]
+    Only rows with i >= 10 are produced.
+    """
+    rows = []
+    for i in range(10, len(winners)):
+        mr = winners[i]              # MR winner at index i
+        prev10 = winners[i-10:i]     # 10 draws BEFORE mr
+        curr10 = winners[i-9:i+1]    # map used for NEXT draw (mr + 9 before)
+
+        prev_map = _hot_to_cold_map(prev10)
+        curr_map = _hot_to_cold_map(curr10)
+
+        prev_letters = _letters_for_map(prev_map)
+        core = _core_letters(mr, prev_letters)
+        u_letters = _plusminus1_union(core)
+
+        prev1 = winners[i-1] if i-1 >= 0 else ""
+        prev2 = winners[i-2] if i-2 >= 0 else ""
+        due = _due_w2(prev1, prev2)
+
+        row = {
+            "mr_winner": int(mr),
+            "prev_map_hot_to_cold": "".join(str(d) for d in prev_map),
+            "curr_map_hot_to_cold": "".join(str(d) for d in curr_map),
+            "core_letters": ", ".join(core) if core else "",
+            "U_letters": ", ".join(u_letters) if u_letters else "",
+            "due_W2": ", ".join(str(d) for d in due) if due else "",
+            "loser_list_0_9": _loser_list_0_9_from_curr(curr_map),
+        }
+        rows.append(row)
+
+    df = pd.DataFrame(rows)
+    df.index.name = "index"
+    return df
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# UI
+# ──────────────────────────────────────────────────────────────────────────────
+
+st.set_page_config(page_title="Loser List Batch Explorer — ±1 Neighborhood Method", layout="wide")
+
+st.title("Loser List Batch Explorer — ±1 Neighborhood Method")
+
+# Clear cache & state (safe across Streamlit versions)
 with st.sidebar:
     if st.button("Clear cache & state"):
         try:
             st.cache_data.clear()
         except Exception:
             pass
+        try:
+            st.cache_resource.clear()
+        except Exception:
+            pass
         st.session_state.clear()
-        st.experimental_rerun()
+        try:
+            st.rerun()
+        except AttributeError:
+            st.experimental_rerun()
 
-# ──────────────────────────────────────────────────────────────────────────────
-# UI: Uploader + options
-# ──────────────────────────────────────────────────────────────────────────────
-st.title("Loser List Batch Explorer — ±1 Neighborhood Method")
-
+# Left controls
 with st.sidebar:
-    uploaded = st.file_uploader("Upload history (TXT/CSV)", type=["txt", "csv"])
+    st.subheader("Upload history (TXT/CSV)")
+    up = st.file_uploader("Drag and drop file here", type=["txt", "csv"])
 
-    order_choice = st.radio(
-        "History order in file",
+    st.markdown("### History order in file")
+    order = st.radio(
+        " ",
         ["Most-recent → Oldest", "Oldest → Most-recent"],
-        index=0,
-        help="This only flips the parsed list; parsing preserves file appearance order."
+        index=1,
+        label_visibility="collapsed",
     )
-    pad4 = st.checkbox("Pad 4-digit items to 5 digits", value=True,
-                       help="If a token has 4 digits, left-pad to 5 (e.g., 1234 → 01234).")
-    force = st.checkbox("Recompute anyway", value=False,
-                        help="Bypass cache for this run.")
-    compute = st.button("Compute", type="primary")
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Helpers
-# ──────────────────────────────────────────────────────────────────────────────
+    pad4 = st.checkbox("Pad 4-digit items to 5 digits", value=True)
+    force = st.checkbox("Recompute anyway", value=False)
+    compute = st.button("Compute")
 
-A2J = "ABCDEFGHIJ"  # rank letters (A = hottest, J = coldest)
+# Maintain state so the page doesn’t auto-reset
+if "batch_df" not in st.session_state:
+    st.session_state.batch_df = None
+if "winners_ordered" not in st.session_state:
+    st.session_state.winners_ordered = []
 
-def parse_winners(content_bytes: bytes, pad4_flag: bool) -> List[str]:
-    """
-    Extract 4–5 digit tokens, keep the exact order they appear,
-    normalize to 5 digits if requested.
-    """
-    text = content_bytes.decode("utf-8", errors="ignore")
-    tokens = re.findall(r'(?<!\d)(\d{4,5})(?!\d)', text)
-    out = []
-    for t in tokens:
-        if len(t) == 5:
-            out.append(t)
-        elif len(t) == 4 and pad4_flag:
-            out.append(t.zfill(5))
-    return out
-
-def window_freqs(seq: List[str]) -> Dict[int, int]:
-    """Count digit frequency 0–9 across a list of 5-digit winners."""
-    c = Counter()
-    for w in seq:
-        for ch in w:
-            c[int(ch)] += 1
-    # ensure keys 0..9 exist
-    for d in range(10):
-        c[d] += 0
-    return dict(c)
-
-def hot_to_cold_string(freqs: Dict[int, int]) -> str:
-    """
-    Return a 10-digit string ordered from hottest to coldest (A→J).
-    Break ties by digit ascending (stable).
-    """
-    ordered = sorted(range(10), key=lambda d: (-freqs[d], d))
-    return "".join(str(d) for d in ordered)
-
-def cold_to_hot_string(freqs: Dict[int, int]) -> str:
-    """Return digits ordered from coldest to hottest (least→most likely)."""
-    ordered = sorted(range(10), key=lambda d: (freqs[d], d))
-    return "".join(str(d) for d in ordered)
-
-def letter_map_from_htc(htc: str) -> Dict[int, str]:
-    """
-    Given a hot→cold string (e.g., '304...'), build map digit→letter,
-    where A=position 0 (hottest), ..., J=position 9 (coldest).
-    """
-    mapping = {}
-    for i, ch in enumerate(htc):
-        mapping[int(ch)] = A2J[i]
-    return mapping
-
-def letters_for_winner(winner: str, digit2letter: Dict[int, str]) -> List[str]:
-    """Map each digit in the winner to its letter on the given hot→cold map."""
-    out = []
-    for ch in winner:
-        out.append(digit2letter[int(ch)])
-    # Keep order but remove duplicates while preserving first appearance
-    seen = set()
-    uniq = []
-    for x in out:
-        if x not in seen:
-            seen.add(x)
-            uniq.append(x)
-    return uniq
-
-def neighborhood_union(letters: List[str]) -> List[str]:
-    """
-    ±1 neighborhood over A..J for the provided letters.
-    Example: C → {B,C,D}; J → {I,J}, A → {A,B}
-    Return unique letters sorted by A..J order.
-    """
-    idx = {ch: i for i, ch in enumerate(A2J)}
-    bag = set()
-    for L in letters:
-        i = idx[L]
-        bag.add(A2J[i])
-        if i - 1 >= 0:
-            bag.add(A2J[i-1])
-        if i + 1 < 10:
-            bag.add(A2J[i+1])
-    return [ch for ch in A2J if ch in bag]
-
-def due_digits_last_W(history: List[str], W: int) -> List[int]:
-    """Digits 0–9 that do not appear in the last W winners (history is a list of 5-digit strings)."""
-    recent = history[-W:] if W > 0 else []
-    seen = set(int(ch) for w in recent for ch in w)
-    return [d for d in range(10) if d not in seen]
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Parse + Preview
-# ──────────────────────────────────────────────────────────────────────────────
-
-winners: List[str] = []
-content_hash = None
-
-if uploaded is not None:
-    raw = uploaded.getvalue()  # ALWAYS current content
-    content_hash = hashlib.md5(raw).hexdigest()
-
-    @st.cache_data(show_spinner=False)
-    def _cached_parse(b: bytes, pad: bool, _sig: str) -> List[str]:
-        return parse_winners(b, pad)
-
-    winners = _cached_parse(raw, pad4, content_hash) if not force else parse_winners(raw, pad4)
-
-    # Apply the order toggle AFTER parsing (we keep the file's appearance order in parse_winners)
-    # We want the list in "Oldest → Most-recent" internally, so reverse if needed.
-    # If user says "Most-recent → Oldest", that means the first line is most-recent,
-    # we flip to have oldest-first processing for the math below.
-    if order_choice == "Most-recent → Oldest":
-        winners = list(reversed(winners))
-
-    st.caption("Parsed winners preview (Oldest → Most-recent after toggle):")
-    colA, colB = st.columns(2)
-    with colA:
-        st.write("Head", winners[:10])
-    with colB:
-        st.write("Tail", winners[-10:])
-
-else:
-    st.info("Upload a history file (TXT or CSV) to begin.")
-    st.stop()
-
-# ──────────────────────────────────────────────────────────────────────────────
 # Compute on demand
-# ──────────────────────────────────────────────────────────────────────────────
-if not compute:
-    st.info("Adjust options if needed, then click **Compute** to build the batch table.")
-    st.stop()
+if compute and up is not None:
+    try:
+        winners = _parse_history(up.read(), up.name, pad4=pad4)
 
-# Minimum winners to make sense
-if len(winners) < 12:
-    st.error("Please provide at least 12 winners (more preferred).")
-    st.stop()
+        # If the file is newest→oldest and user chose "Oldest→Most-recent",
+        # reverse. Otherwise keep file order.
+        if order.startswith("Most-recent"):
+            # File lists MR first; convert to oldest→most-recent baseline
+            winners = list(reversed(winners))
+        else:
+            # File already oldest→most-recent
+            pass
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Batch computation
-# We treat the list as Oldest → Most-recent (after toggle).
-# For each index j (current winner), we build the row based on windows ending at j-1 and j.
-# Window length for maps: 10 previous draws.
-# ──────────────────────────────────────────────────────────────────────────────
+        st.session_state.winners_ordered = winners
+        st.session_state.batch_df = _build_batch(winners)
 
-rows = []
-WIN = 10
-for j in range(len(winners)):
-    mr = winners[j]
+    except Exception as e:
+        st.error(f"Failed to compute: {e}")
 
-    # windows:
-    prev_window_start = max(0, j - WIN)
-    prev_window = winners[prev_window_start:j]  # up to but excluding current (j)
-    curr_window_start = max(0, j - WIN + 1)
-    curr_window = winners[curr_window_start:j+1]  # including current
+elif compute and up is None:
+    st.warning("Please upload a TXT/CSV of winners first.")
 
-    # Need at least 1 in prev_window to compute letters meaningfully
-    if len(prev_window) == 0:
-        # Leave row with N/A-like placeholders
-        rows.append({
-            "index": j,
-            "mr_winner": mr,
-            "prev_map_hot_to_cold": "",
-            "curr_map_hot_to_cold": "",
-            "core_letters": "",
-            "U_letters": "",
-            "due_W2": "",
-            "loser_list_0_9": "",
-        })
-        continue
+elif force and st.session_state.winners_ordered:
+    st.session_state.batch_df = _build_batch(st.session_state.winners_ordered)
 
-    # Maps
-    prev_freqs = window_freqs(prev_window)
-    prev_htc = hot_to_cold_string(prev_freqs)
+# Helper: small method refresher
+with st.expander("Method refresher"):
+    st.markdown(
+        """
+**Per row (winner `mr_winner`):**
 
-    curr_freqs = window_freqs(curr_window)
-    curr_htc = hot_to_cold_string(curr_freqs)
+- **prev_map_hot_to_cold** = frequency map from the **10 draws before** `mr_winner` (A=hot … J=cold).
+- **curr_map_hot_to_cold** = frequency map from `mr_winner` + the **9 draws before** it (i.e., the map you’d use to guess the *next* draw).
+- **core_letters** = letters used by `mr_winner` when tagged on the **previous** map.
+- **U_letters** = union of ±1 neighborhoods of those letters (B → {A,B,C}, F → {E,F,G}, J → {I,J}, etc).
+- **due_W2** = digits not present in the **previous two** winners (`i-2`, `i-1`).
+- **loser_list_0_9** = digits **coldest→hottest** from the current map (a 10-digit string).
+"""
+    )
 
-    # Core letters: map each digit of current winner on the PREV map
-    d2L_prev = letter_map_from_htc(prev_htc)
-    core = letters_for_winner(mr, d2L_prev)  # unique in order of first appearance
+# View options
+st.markdown("### View options")
+col_v1, col_v2 = st.columns([1, 1])
+with col_v1:
+    show_oldest_first = st.checkbox("Show oldest → newest in table", value=True)
+with col_v2:
+    show_pairs = st.checkbox("Show pairs: seed (prev) → next", value=False)
 
-    # U letters: ±1 neighborhood union (A..J)
-    U = neighborhood_union(core)
-
-    # Due_W2: based on last 2 draws BEFORE current (i.e., winners[j-2:j])
-    due_W2 = due_digits_last_W(winners[max(0, j-2):j], W=2)
-
-    # Loser list: digits coldest→hottest on the CURRENT map
-    loser_0_9 = cold_to_hot_string(curr_freqs)
-
-    rows.append({
-        "index": j,
-        "mr_winner": mr,
-        "prev_map_hot_to_cold": prev_htc,
-        "curr_map_hot_to_cold": curr_htc,
-        "core_letters": ", ".join(core),
-        "U_letters": ", ".join(U),
-        "due_W2": ", ".join(str(d) for d in due_W2),
-        "loser_list_0_9": loser_0_9,
-    })
-
-df = pd.DataFrame(rows)
-
-# ──────────────────────────────────────────────────────────────────────────────
-# View options + table
-# ──────────────────────────────────────────────────────────────────────────────
-st.subheader("Batch table")
-
-with st.expander("View options", expanded=True):
-    col1, col2 = st.columns(2)
-    with col1:
-        show_oldest_to_newest = st.checkbox("Show oldest → newest", value=True,
-                                            help="When checked, table shows the same internal order (oldest first).")
-    with col2:
-        pair_view = st.checkbox("Show pairs: seed (row j-1) directly above winner (row j)", value=False,
-                                help="Helpful if you want to see the dependency row-by-row. (The data itself is already computed that way.)")
-
-# Order dataframe for display
-df_disp = df.copy()
-if show_oldest_to_newest:
-    df_disp = df_disp.sort_values("index", ascending=True)
+# Batch table
+st.markdown("### Batch table")
+df = st.session_state.batch_df
+if df is None or df.empty:
+    st.info("Upload a file and click **Compute** to see results.")
 else:
-    df_disp = df_disp.sort_values("index", ascending=False)
+    view_df = df.copy()
+    # Table order: by default rows are chronological (0=first row produced, which
+    # corresponds to the earliest index where we have 10 winners of history).
+    if not show_oldest_first:
+        view_df = view_df.iloc[::-1].copy()
 
-st.dataframe(df_disp, use_container_width=True, height=500)
+    st.dataframe(view_df, use_container_width=True, height=520)
 
-# Row detail
-st.subheader("Row detail")
-row_idx = st.number_input("Select row index (0 = oldest)", min_value=0, max_value=int(df["index"].max()), value=0, step=1)
-detail = df[df["index"] == row_idx]
-st.write(detail if not detail.empty else "No data for that index.")
+    # Row detail
+    st.markdown("### Row detail")
+    idx = st.number_input(
+        "Select row index (0 is the earliest row that has full history)",
+        min_value=int(view_df.index.min()),
+        max_value=int(view_df.index.max()),
+        value=int(view_df.index.min()),
+        step=1,
+    )
 
-# Download
-st.download_button(
-    "Download batch table (CSV)",
-    data=df.to_csv(index=False),
-    file_name="loser_list_batch_table.csv",
-    mime="text/csv"
-)
+    try:
+        # Convert back to original df index if user is viewing reversed
+        if show_oldest_first:
+            row = df.loc[idx]
+            base_idx = idx
+        else:
+            # map the visible idx back to original position
+            # visible order: reversed df; original index at that position is:
+            base_idx = int(view_df.index[view_df.index == idx][0])
+            row = df.loc[base_idx]
 
-st.caption("""
-**Notes**
-- We treat uploaded winners in the exact order you provided; the toggle flips it to *Oldest → Most-recent* internally for processing.  
-- `prev_map_hot_to_cold` uses the previous 10 winners (ending at row j−1).  
-- `curr_map_hot_to_cold` uses a 10-winner window **including** the current row j (this is what you'd use to predict j+1).  
-- `core_letters` are A–J letters for the current winner mapped onto the *previous* map; `U_letters` is the ±1 neighborhood union.  
-- `due_W2` lists digits that didn’t appear in the prior 2 draws (before the current).  
-- `loser_list_0_9` orders digits from **coldest→hottest** on the current map.  
-""")
+        st.write(
+            pd.DataFrame(
+                {
+                    "mr_winner": [row["mr_winner"]],
+                    "prev_map_hot_to_cold": [row["prev_map_hot_to_cold"]],
+                    "curr_map_hot_to_cold": [row["curr_map_hot_to_cold"]],
+                    "core_letters": [row["core_letters"]],
+                    "U_letters": [row["U_letters"]],
+                    "due_W2": [row["due_W2"]],
+                    "loser_list_0_9": [row["loser_list_0_9"]],
+                }
+            )
+        )
+
+        if show_pairs:
+            winners = st.session_state.winners_ordered
+            # MR index in the ordered winners list is base_idx (shifted by 10 because our table starts at i=10)
+            mr_global_i = base_idx + 10
+            seed = winners[mr_global_i - 1] if mr_global_i - 1 >= 0 else ""
+            nxt = winners[mr_global_i + 1] if mr_global_i + 1 < len(winners) else ""
+            st.markdown(
+                f"**Pair around MR** — seed (prev) → **{seed or '—'}**, next → **{nxt or '—'}**"
+            )
+    except Exception as e:
+        st.warning(f"Could not show row detail: {e}")
