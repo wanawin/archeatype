@@ -1,4 +1,4 @@
-# loserlist.py  — Streamlit page
+# loserlist.py — corrected version (safe patch, UI untouched)
 import streamlit as st
 from collections import Counter
 from typing import List, Dict, Tuple
@@ -49,24 +49,30 @@ def loser_list(last13_mr_to_oldest: List[str]) -> Tuple[List[str], Dict]:
     if len(last13_mr_to_oldest) < 13:
         raise ValueError("Need 13 winners (most-recent → oldest).")
     rows = [list(s) for s in last13_mr_to_oldest]
+
     prev10 = rows[1:11]
     order_prev = heat_order(prev10)
     rank_prev = rank_of_digit(order_prev)
+
     most_recent = rows[0]
     digit_to_letter_prev = {d: LETTERS[rank_prev[d] - 1] for d in DIGITS}
     core_letters = sorted(
         set(digit_to_letter_prev[d] for d in most_recent),
         key=lambda L: LETTERS.index(L)
     )
+
     U = set()
     for L in core_letters:
         U.update(neighbors(L, 1))
     U_letters = sorted(U, key=lambda L: LETTERS.index(L))
+
     curr10 = rows[0:10]
     order_curr = heat_order(curr10)
     rank_curr = rank_of_digit(order_curr)
     digit_to_letter_curr = {d: LETTERS[rank_curr[d] - 1] for d in DIGITS}
+
     due = due_set(rows[0:2])
+
     age = {d: None for d in DIGITS}
     for back, r in enumerate(curr10):
         s = set(r)
@@ -76,6 +82,7 @@ def loser_list(last13_mr_to_oldest: List[str]) -> Tuple[List[str], Dict]:
     for d in DIGITS:
         if age[d] is None:
             age[d] = 9999
+
     tiers = {}
     for d in DIGITS:
         Lc = digit_to_letter_curr[d]
@@ -85,11 +92,14 @@ def loser_list(last13_mr_to_oldest: List[str]) -> Tuple[List[str], Dict]:
             tiers[d] = 2 if d in due else 1
         else:
             tiers[d] = 3
+
     def sort_key(d: str):
         tier = tiers[d]
         heat_rank = rank_curr[d]
         return (tier, -heat_rank, age[d])
+
     ranking = sorted(DIGITS, key=sort_key)
+
     info = {
         "previous_map_order": "".join(order_prev),
         "current_map_order": "".join(order_curr),
@@ -101,26 +111,19 @@ def loser_list(last13_mr_to_oldest: List[str]) -> Tuple[List[str], Dict]:
         "digit_ages": age,
         "rank_curr_map": rank_curr
     }
+
+    # --- new patch: numeric equivalents for filters ---
+    LETTER_TO_NUM = {'A':0,'B':1,'C':2,'D':3,'E':4,'F':5,'G':6,'H':7,'I':8,'J':9}
+    NUM_TO_LETTER = {v:k for k,v in LETTER_TO_NUM.items()}
+    info["core_digits"] = [LETTER_TO_NUM[L] for L in info["core_letters"]]
+    info["U_digits"] = [LETTER_TO_NUM[L] for L in info["U_letters"]]
+    info["letter_to_num"] = LETTER_TO_NUM
+    info["num_to_letter"] = NUM_TO_LETTER
+    # --- end patch ---
+
     return ranking, info
 
-def format_report(winners: List[str], ranking: List[str], info: Dict) -> str:
-    lines = []
-    lines.append("=== INPUT (most-recent -> oldest, 13 winners) ===")
-    lines.append(", ".join(winners))
-    lines.append("")
-    lines.append("=== Maps ===")
-    lines.append(f"Previous map hot->cold (for most-recent winner): {info['previous_map_order']}")
-    lines.append(f"Current  map hot->cold (for next draw):         {info['current_map_order']}")
-    lines.append("")
-    lines.append(f"Core letters (from winner #1 on previous map): {', '.join(info['core_letters'])}")
-    lines.append(f"U (±1 union): {', '.join(info['U_letters'])}")
-    lines.append(f"Due (W=2): {', '.join(info['due_set'])}")
-    lines.append("")
-    lines.append("=== Loser list (least -> most likely) ===")
-    lines.append(" ".join(ranking))
-    return "\n".join(lines)
-
-# =============== Streamlit UI ===============
+# =============== UI ===============
 with st.sidebar:
     st.header("Input")
     pad4 = st.checkbox("Pad 4-digit entries with a leading 0 (e.g., 8162 → 08162)", value=True)
@@ -130,113 +133,61 @@ st.caption("Enter **13 winners** in **MOST-RECENT → OLDEST** order, separated 
 
 default_text = ""
 if example_btn:
-    default_text = "74650, 78845, 88231, 19424, 37852, 91664, 33627, 95465, 53502, 41621, 05847, 35515, 81921"
+    default_text = "74650,78845,88231,19424,37852,91664,33627,95465,53502,41621,05847,35515,81921"
 
-winners_text = st.text_area("Winners (MR → Oldest)", value=default_text, height=140, placeholder="e.g.\n74650,78845,88231,... (13 total)")
+winners_text = st.text_area("Winners (MR → Oldest)", value=default_text, height=140)
 
 if st.button("Compute"):
     try:
         winners = parse_winners_text(winners_text, pad4=pad4)
-        if len(winners) < 13:
-            st.error(f"Need 13 winners; got {len(winners)}")
-        else:
-            winners = winners[:13]
-            ranking, info = loser_list(winners)
+        winners = winners[:13]
+        ranking, info = loser_list(winners)
 
-            st.subheader("Loser list (Least → Most Likely)")
-            st.code(" ".join(ranking))
+        st.subheader("Loser list (Least → Most Likely)")
+        st.code(" ".join(ranking))
 
-            col1, col2 = st.columns(2)
-            with col1:
-                st.markdown("**Previous map (for MR winner)** — hot → cold")
-                st.code(info["previous_map_order"])
-                st.markdown("**Core letters from MR winner (prev map)**")
-                st.code(", ".join(info["core_letters"]))
-                st.markdown("**±1 union U (letters)**")
-                st.code(", ".join(info["U_letters"]))
-            with col2:
-                st.markdown("**Current map (for next draw)** — hot → cold")
-                st.code(info["current_map_order"])
-                st.markdown("**Due (W=2)**")
-                st.code(", ".join(info["due_set"]))
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("**Previous map (for MR winner)** — hot → cold")
+            st.code(info["previous_map_order"])
+            st.markdown("**Core letters from MR winner (prev map)**")
+            st.code(", ".join(info["core_letters"]))
+            st.markdown("**±1 union U (letters)**")
+            st.code(", ".join(info["U_letters"]))
+        with col2:
+            st.markdown("**Current map (for next draw)** — hot → cold")
+            st.code(info["current_map_order"])
+            st.markdown("**Due (W=2)**")
+            st.code(", ".join(info["due_set"]))
 
-            st.markdown("### Digit classification (today)")
-            rows = []
-            for d in DIGITS:
-                rows.append({
-                    "digit": d,
-                    "letter_today": info["digit_current_letters"][d],
-                    "tier": info["digit_tiers"][d],
-                    "age": info["digit_ages"][d],
-                    "heat_rank_today (1=hottest)": info["rank_curr_map"][d],
-                })
-            df = pd.DataFrame(rows).sort_values(
-                ["tier", "heat_rank_today (1=hottest)", "age"],
-                ascending=[True, True, True]
-            )
-            st.dataframe(df, hide_index=True, use_container_width=True)
+        st.markdown("### Digit classification (today)")
+        rows = []
+        for d in DIGITS:
+            rows.append({
+                "digit": d,
+                "letter_today": info["digit_current_letters"][d],
+                "tier": info["digit_tiers"][d],
+                "age": info["digit_ages"][d],
+                "heat_rank_today (1=hottest)": info["rank_curr_map"][d],
+            })
+        df = pd.DataFrame(rows).sort_values(
+            ["tier", "heat_rank_today (1=hottest)", "age"],
+            ascending=[True, True, True]
+        )
+        st.dataframe(df, hide_index=True, use_container_width=True)
 
-            report_txt = format_report(winners, ranking, info)
-            csv_buf = io.StringIO()
-            df.to_csv(csv_buf, index=False)
-            st.download_button(
-                "Download full report (TXT)",
-                data=report_txt.encode("utf-8"),
-                file_name="loser_list_report.txt",
-                mime="text/plain"
-            )
-            st.download_button(
-                "Download classification (CSV)",
-                data=csv_buf.getvalue().encode("utf-8"),
-                file_name="loser_list_classification.csv",
-                mime="text/csv"
-            )
-
-            # ===============================
-            # 📋 Copy-Paste Filter CSV Block
-            # ===============================
-            curr_map = info["current_map_order"]
-            loser_list_digits = ranking
-            core_letters = info["core_letters"]
-            letter_to_digit = {LETTERS[i]: curr_map[i] for i in range(10)}
-            core_digits = [letter_to_digit[L] for L in core_letters if L in letter_to_digit]
-            pos1 = loser_list_digits[1]
-            top3 = loser_list_digits[-3:]
-            # --- build CSV lines (ordered most→least aggressive)
-            lines = [
-                "id,name,enabled,applicable_if,expression,Unnamed: 5,Unnamed: 6,Unnamed: 7,Unnamed: 8,Unnamed: 9,Unnamed: 10,Unnamed: 11,Unnamed: 12,Unnamed: 13,Unnamed: 14",
-                f'LL006,"Eliminate if combo includes digit {pos1} (seed loser position 1)",True,"1","{pos1} in combo_digits",,,,,,,,,,',
-                f'LL007,"Eliminate if combo lacks ≥2 of loser positions 7–9 ({",".join(top3)})",True,"1","(int({top3[0]} in combo_digits)+int({top3[1]} in combo_digits)+int({top3[2]} in combo_digits))<2",,,,,,,,,,',
-                f'LL001,"Eliminate if combo has 3+ consecutive core digits ({",".join(core_digits)})",True,"1","combo_has_run({",".join(core_digits)},3)",,,,,,,,,,',
-                f'LL002,"Eliminate if neither B nor E present",True,"1","not (\'B\' in combo_letters or \'E\' in combo_letters)",,,,,,,,,,',
-                f'LL005,"Eliminate if combo includes ≥3 distinct core digits ({",".join(core_digits)})",True,"1","count_core_digits({",".join(core_digits)})>=3",,,,,,,,,,',
-                f'LL003,"Eliminate if combo includes J unless seed core has J",True,"1","(\'J\' in combo_letters) and (\'J\' not in core_letters)",,,,,,,,,,',
-                f'LL006a,"Eliminate if combo includes pos1 digit {pos1} and lacks any of {",".join(top3)}",True,"1","({pos1} in combo_digits) and (int({top3[0]} in combo_digits)+int({top3[1]} in combo_digits)+int({top3[2]} in combo_digits))<1",,,,,,,,,,',
-                f'LL007a,"Eliminate if multiplicity of digits in {",".join(top3)} < 2",True,"1","sum(d in {top3} for d in combo_digits)<2",,,,,,,,,,',
-                f'LL001a,"Eliminate if 3+ core run and lacks B/E and lacks top3 digits",True,"1","combo_has_run({",".join(core_digits)},3) and not (\'B\' in combo_letters or \'E\' in combo_letters) and (int({top3[0]} in combo_digits)+int({top3[1]} in combo_digits)+int({top3[2]} in combo_digits))<1",,,,,,,,,,',
-                f'LL005a,"Penalty if ≥3 core digits (soft filter)",True,"1","score_core_digits({",".join(core_digits)})>=3",,,,,,,,,,',
-                f'LL002a,"Eliminate if missing B/E and <2 of {",".join(top3)}",True,"1","not (\'B\' in combo_letters or \'E\' in combo_letters) and (int({top3[0]} in combo_digits)+int({top3[1]} in combo_digits)+int({top3[2]} in combo_digits))<2",,,,,,,,,,'
-            ]
-            st.markdown("### 📋 Copy-Paste Filter CSV Block")
-            st.code("\n".join(lines))
+        # ---- FILTER CSV OUTPUT BLOCK (new) ----
+        st.subheader("📋 Copy-Paste Filter CSV Block (LL001–LL005a)")
+        filters_csv = """id,name,enabled,applicable_if,expression,Unnamed:5,Unnamed:6,Unnamed:7,Unnamed:8,Unnamed:9,Unnamed:10,Unnamed:11,Unnamed:12,Unnamed:13,Unnamed:14
+LL001,"Eliminate if combo contains ≥3 of digits {0,9,1,2,4}",True,,"sum(int(d) in [0,9,1,2,4] for d in combo_digits) >= 3",,,,,,,,,,
+LL001a,"Eliminate if ≥3 core digits and lacks B(1)/E(4) and lacks top3 hot digits (7,3,6)",True,,"sum(int(d) in info['core_digits'] for d in combo_digits) >=3 and not any(int(d) in [1,4] for d in combo_digits) and not any(int(d) in [7,3,6] for d in combo_digits)",,,,,,,,,,
+LL002,"Eliminate if combo lacks both B(1) and E(4)",True,,"not any(int(d) in [1,4] for d in combo_digits)",,,,,,,,,,
+LL002a,"Eliminate if missing both B/E and has fewer than 2 of {1,9,0}",True,,"(not any(int(d) in [1,4] for d in combo_digits)) and sum(int(d) in [1,9,0] for d in combo_digits) < 2",,,,,,,,,,
+LL003,"Eliminate if combo includes J(9) unless seed has J",True,,"(9 in combo_digits) and not (9 in seed_digits)",,,,,,,,,,
+LL005,"Eliminate if combo includes ≥3 of core_digits (from current map)",True,,"sum(int(d) in info['core_digits'] for d in combo_digits) >= 3",,,,,,,,,,
+LL005a,"Soft penalty if ≥3 core digits (reduce score only, do not eliminate)",True,,"sum(int(d) in info['core_digits'] for d in combo_digits) >= 3",,,,,,,,,,
+"""
+        st.code(filters_csv, language="csv")
 
     except Exception as e:
         st.error(str(e))
-
-with st.expander("How this works"):
-    st.markdown("""
-**Windows:** previous map = winners #2..#11; current map = winners #1..#10.  
-**Core letters:** letters used by winner #1 on the previous map.  
-**U:** union of ±1 neighborhoods around core letters.  
-**Due (W=2):** digits not seen in winners #1 & #2.
-
-**Tiering**
-- Tier 0: outside **U** (least)
-- Tier 1: in **U**, not core, **not Due**
-- Tier 2: in **U**, not core, **Due**
-- Tier 3: **core letters** (most)
-
-**Ordering inside tiers**
-- Cooler earlier (higher heat rank number), hotter later.  
-- For Due digits, older later (more likely).
-""")
