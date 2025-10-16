@@ -1,4 +1,7 @@
-# loserlist.py — final version with unique-digit rules applied to LL001/LL001a/LL005/LL005a
+# =========================================================
+#  Loser List (Least → Most Likely) — ±1 Neighborhood Method
+#  Updated: Adds automatic filter export (LL007–LL009, etc.)
+# =========================================================
 import streamlit as st
 from collections import Counter
 from typing import List, Dict, Tuple
@@ -41,7 +44,7 @@ def parse_winners_text(txt: str, pad4: bool = False) -> List[str]:
         if len(tok) == 4 and pad4:
             tok = tok.zfill(5)
         if len(tok) != 5:
-            raise ValueError(f"Each item must be 5 digits (or 4 with 'Pad 4-digits'): got {tok!r}")
+            raise ValueError(f"Each item must be 5 digits")
         out.append(tok)
     return out
 
@@ -56,10 +59,7 @@ def loser_list(last13_mr_to_oldest: List[str]) -> Tuple[List[str], Dict]:
 
     most_recent = rows[0]
     digit_to_letter_prev = {d: LETTERS[rank_prev[d] - 1] for d in DIGITS}
-    core_letters = sorted(
-        set(digit_to_letter_prev[d] for d in most_recent),
-        key=lambda L: LETTERS.index(L)
-    )
+    core_letters = sorted(set(digit_to_letter_prev[d] for d in most_recent), key=lambda L: LETTERS.index(L))
 
     U = set()
     for L in core_letters:
@@ -94,9 +94,7 @@ def loser_list(last13_mr_to_oldest: List[str]) -> Tuple[List[str], Dict]:
             tiers[d] = 3
 
     def sort_key(d: str):
-        tier = tiers[d]
-        heat_rank = rank_curr[d]
-        return (tier, -heat_rank, age[d])
+        return (tiers[d], -rank_curr[d], age[d])
 
     ranking = sorted(DIGITS, key=sort_key)
 
@@ -107,85 +105,76 @@ def loser_list(last13_mr_to_oldest: List[str]) -> Tuple[List[str], Dict]:
         "U_letters": U_letters,
         "due_set": sorted(list(due)),
         "digit_current_letters": {d: digit_to_letter_curr[d] for d in DIGITS},
-        "digit_tiers": tiers,
-        "digit_ages": age,
-        "rank_curr_map": rank_curr
+        "digit_prev_letters": {d: digit_to_letter_prev[d] for d in DIGITS},
+        "rank_curr_map": rank_curr,
+        "rank_prev_map": rank_prev,
     }
-
-    LETTER_TO_NUM = {'A':0,'B':1,'C':2,'D':3,'E':4,'F':5,'G':6,'H':7,'I':8,'J':9}
-    info["core_digits"] = [LETTER_TO_NUM[L] for L in info["core_letters"]]
-    info["U_digits"] = [LETTER_TO_NUM[L] for L in info["U_letters"]]
-    info["letter_to_num"] = LETTER_TO_NUM
-
     return ranking, info
 
-# =============== UI ===============
+def format_report(winners: List[str], ranking: List[str], info: Dict) -> str:
+    lines = []
+    lines.append("=== INPUT ===")
+    lines.append(", ".join(winners))
+    lines.append("")
+    lines.append(f"Prev map: {info['previous_map_order']}")
+    lines.append(f"Curr map: {info['current_map_order']}")
+    lines.append(f"Core letters: {', '.join(info['core_letters'])}")
+    lines.append(f"U (±1): {', '.join(info['U_letters'])}")
+    lines.append(f"Due: {', '.join(info['due_set'])}")
+    lines.append("")
+    lines.append("Loser list (Least → Most Likely):")
+    lines.append(" ".join(ranking))
+    return "\n".join(lines)
+
+# =============== Streamlit UI ===============
 with st.sidebar:
     st.header("Input")
-    pad4 = st.checkbox("Pad 4-digit entries with a leading 0 (e.g., 8162 → 08162)", value=True)
-    example_btn = st.button("Load example (demo)")
+    pad4 = st.checkbox("Pad 4-digit entries (08162)", value=True)
+    example_btn = st.button("Load example")
 
-st.caption("Enter **13 winners** in **MOST-RECENT → OLDEST** order, separated by commas or newlines.")
-
-default_text = ""
 if example_btn:
-    default_text = "74650,78845,88231,19424,37852,91664,33627,95465,53502,41621,05847,35515,81921"
-
-winners_text = st.text_area("Winners (MR → Oldest)", value=default_text, height=140)
+    winners_text = "74650,78845,88231,19424,37852,91664,33627,95465,53502,41621,05847,35515,81921"
+else:
+    winners_text = st.text_area("Enter 13 winners (MR→Oldest):", height=140)
 
 if st.button("Compute"):
-    try:
-        winners = parse_winners_text(winners_text, pad4=pad4)
-        winners = winners[:13]
-        ranking, info = loser_list(winners)
+    winners = parse_winners_text(winners_text, pad4=pad4)
+    ranking, info = loser_list(winners)
 
-        st.subheader("Loser list (Least → Most Likely)")
-        st.code(" ".join(ranking))
+    st.subheader("Loser list (Least → Most Likely)")
+    st.code(" ".join(ranking))
 
-        col1, col2 = st.columns(2)
-        with col1:
-            st.markdown("**Previous map (for MR winner)** — hot → cold")
-            st.code(info["previous_map_order"])
-            st.markdown("**Core letters from MR winner (prev map)**")
-            st.code(", ".join(info["core_letters"]))
-            st.markdown("**±1 union U (letters)**")
-            st.code(", ".join(info["U_letters"]))
-        with col2:
-            st.markdown("**Current map (for next draw)** — hot → cold")
-            st.code(info["current_map_order"])
-            st.markdown("**Due (W=2)**")
-            st.code(", ".join(info["due_set"]))
+    st.write("### Digit Classifications")
+    rows = [{"Digit": d, "Prev Rank": info['rank_prev_map'][d],
+             "Curr Rank": info['rank_curr_map'][d],
+             "Prev→Curr": f"{info['digit_prev_letters'][d]}→{info['digit_current_letters'][d]}"} for d in DIGITS]
+    st.dataframe(pd.DataFrame(rows), hide_index=True)
 
-        st.markdown("### Digit classification (today)")
-        rows = []
-        for d in DIGITS:
-            rows.append({
-                "digit": d,
-                "letter_today": info["digit_current_letters"][d],
-                "tier": info["digit_tiers"][d],
-                "age": info["digit_ages"][d],
-                "heat_rank_today (1=hottest)": info["rank_curr_map"][d],
-            })
-        df = pd.DataFrame(rows).sort_values(
-            ["tier", "heat_rank_today (1=hottest)", "age"],
-            ascending=[True, True, True]
-        )
-        st.dataframe(df, hide_index=True, use_container_width=True)
+    # ==================================================
+    # NEW FILTER GENERATION SECTION (auto CSV block)
+    # ==================================================
+    st.markdown("### 📋 Auto-Generated Filters (Copy-Paste Block)")
+    filters = [
+        ("LL007","If previous heatmap F moves to I, require combo to include I(8)",
+         "(5 in info['rank_prev_map'].values() and 8 in info['rank_curr_map'].values()) and not (8 in combo_digits)"),
+        ("LL008","If previous heatmap G moves to I, require combo to include I(8)",
+         "(6 in info['rank_prev_map'].values() and 8 in info['rank_curr_map'].values()) and not (8 in combo_digits)"),
+        ("LL009","Eliminate if any digit that cooled appears more than once",
+         "any(combo_digits.count(d) > 1 for d in [d for d in DIGITS if info['rank_curr_map'][d] > info['rank_prev_map'][d]])"),
+        ("LL004R","Eliminate combos with two or more new-core letters",
+         "sum(1 for d in combo_digits if info['digit_current_letters'][d] not in info['core_letters']) >= 2"),
+        ("XXXLL003B","Eliminate combos with ≤2 new-core letters (aggressive trim)",
+         "sum(1 for d in combo_digits if info['digit_current_letters'][d] not in info['core_letters']) <= 2"),
+        ("XXXLL002B","Eliminate combos missing ≥2 of loser list digits 7–9 (aggressive trim)",
+         "sum(1 for d in combo_digits if d in ranking[7:10]) < 2"),
+        ("XXXLL001B","Eliminate combos containing any of digits 0,9,1,2,4 (simple trim, no dup check)",
+         "any(d in ['0','9','1','2','4'] for d in combo_digits)"),
+    ]
 
-        # ---- FILTER CSV OUTPUT BLOCK ----
-        st.subheader("📋 Copy-Paste Filter CSV Block (LL001–LL005a)")
-        core_digits_str = ",".join(str(x) for x in info["core_digits"])
+    csv_lines = ["id,name,enabled,applicable_if,expression,Unnamed:5,Unnamed:6,Unnamed:7,Unnamed:8,Unnamed:9,Unnamed:10,Unnamed:11,Unnamed:12,Unnamed:13,Unnamed:14"]
+    for fid, name, expr in filters:
+        csv_lines.append(f'{fid},"{name}",True,,"{expr}",,,,,,,,,,')
+    csv_block = "\n".join(csv_lines)
+    st.code(csv_block, language="csv")
 
-        filters_csv = f"""id,name,enabled,applicable_if,expression,Unnamed:5,Unnamed:6,Unnamed:7,Unnamed:8,Unnamed:9,Unnamed:10,Unnamed:11,Unnamed:12,Unnamed:13,Unnamed:14
-LL001,"Eliminate if combo has ≥3 distinct digits in {{0,9,1,2,4}}",True,,"len(set(combo_digits) & set([0,9,1,2,4])) >= 3",,,,,,,,,,
-LL001a,"Eliminate if ≥3 distinct core digits and lacks B(1)/E(4) and lacks top3 hot digits (7,3,6)",True,,"len(set(combo_digits) & set([{core_digits_str}])) >=3 and not any(int(d) in [1,4] for d in combo_digits) and not any(int(d) in [7,3,6] for d in combo_digits)",,,,,,,,,,
-LL002,"Eliminate if combo lacks both B(1) and E(4)",True,,"not any(int(d) in [1,4] for d in combo_digits)",,,,,,,,,,
-LL002a,"Eliminate if missing both B/E and has fewer than 2 of {{1,9,0}}",True,,"(not any(int(d) in [1,4] for d in combo_digits)) and len(set(combo_digits) & set([1,9,0])) < 2",,,,,,,,,,
-LL003,"Eliminate if combo includes J(9) unless seed has J",True,,"(9 in combo_digits) and not (9 in seed_digits)",,,,,,,,,,
-LL005,"Eliminate if combo includes ≥3 distinct core digits",True,,"len(set(combo_digits) & set([{core_digits_str}])) >= 3",,,,,,,,,,
-LL005a,"Eliminate if combo includes ≥3 distinct core digits (alternate version)",True,,"len(set(combo_digits) & set([{core_digits_str}])) >= 3",,,,,,,,,,
-"""
-        st.code(filters_csv, language="csv")
-
-    except Exception as e:
-        st.error(str(e))
+    st.success("✅ Copy this block and paste directly into your Filter Tester CSV under LL006.")
