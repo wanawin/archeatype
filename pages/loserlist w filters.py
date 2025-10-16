@@ -1,4 +1,4 @@
-# loserlist.py — final corrected version (UI untouched, LL filter generation fixed)
+# loserlist.py — final version with unique-digit rules applied to LL001/LL001a/LL005/LL005a
 import streamlit as st
 from collections import Counter
 from typing import List, Dict, Tuple
@@ -112,13 +112,10 @@ def loser_list(last13_mr_to_oldest: List[str]) -> Tuple[List[str], Dict]:
         "rank_curr_map": rank_curr
     }
 
-    # --- numeric equivalents for filters ---
     LETTER_TO_NUM = {'A':0,'B':1,'C':2,'D':3,'E':4,'F':5,'G':6,'H':7,'I':8,'J':9}
-    NUM_TO_LETTER = {v:k for k,v in LETTER_TO_NUM.items()}
     info["core_digits"] = [LETTER_TO_NUM[L] for L in info["core_letters"]]
     info["U_digits"] = [LETTER_TO_NUM[L] for L in info["U_letters"]]
     info["letter_to_num"] = LETTER_TO_NUM
-    info["num_to_letter"] = NUM_TO_LETTER
 
     return ranking, info
 
@@ -175,18 +172,18 @@ if st.button("Compute"):
         )
         st.dataframe(df, hide_index=True, use_container_width=True)
 
-        # ---- FILTER CSV OUTPUT BLOCK (final working version) ----
+        # ---- FILTER CSV OUTPUT BLOCK ----
         st.subheader("📋 Copy-Paste Filter CSV Block (LL001–LL005a)")
         core_digits_str = ",".join(str(x) for x in info["core_digits"])
 
         filters_csv = f"""id,name,enabled,applicable_if,expression,Unnamed:5,Unnamed:6,Unnamed:7,Unnamed:8,Unnamed:9,Unnamed:10,Unnamed:11,Unnamed:12,Unnamed:13,Unnamed:14
-LL001,"Eliminate if combo contains ≥3 of digits {{0,9,1,2,4}}",True,,"sum(int(d) in [0,9,1,2,4] for d in combo_digits) >= 3",,,,,,,,,,
-LL001a,"Eliminate if ≥3 core digits and lacks B(1)/E(4) and lacks top3 hot digits (7,3,6)",True,,"sum(int(d) in [{core_digits_str}] for d in combo_digits) >=3 and not any(int(d) in [1,4] for d in combo_digits) and not any(int(d) in [7,3,6] for d in combo_digits)",,,,,,,,,,
+LL001,"Eliminate if combo has ≥3 distinct digits in {{0,9,1,2,4}}",True,,"len(set(combo_digits) & set([0,9,1,2,4])) >= 3",,,,,,,,,,
+LL001a,"Eliminate if ≥3 distinct core digits and lacks B(1)/E(4) and lacks top3 hot digits (7,3,6)",True,,"len(set(combo_digits) & set([{core_digits_str}])) >=3 and not any(int(d) in [1,4] for d in combo_digits) and not any(int(d) in [7,3,6] for d in combo_digits)",,,,,,,,,,
 LL002,"Eliminate if combo lacks both B(1) and E(4)",True,,"not any(int(d) in [1,4] for d in combo_digits)",,,,,,,,,,
-LL002a,"Eliminate if missing both B/E and has fewer than 2 of {{1,9,0}}",True,,"(not any(int(d) in [1,4] for d in combo_digits)) and sum(int(d) in [1,9,0] for d in combo_digits) < 2",,,,,,,,,,
+LL002a,"Eliminate if missing both B/E and has fewer than 2 of {{1,9,0}}",True,,"(not any(int(d) in [1,4] for d in combo_digits)) and len(set(combo_digits) & set([1,9,0])) < 2",,,,,,,,,,
 LL003,"Eliminate if combo includes J(9) unless seed has J",True,,"(9 in combo_digits) and not (9 in seed_digits)",,,,,,,,,,
-LL005,"Eliminate if combo includes ≥3 of core_digits (from current map)",True,,"sum(int(d) in [{core_digits_str}] for d in combo_digits) >= 3",,,,,,,,,,
-LL005a,"Eliminate if combo includes ≥3 of core_digits (alternate version, binary elimination only)",True,,"sum(int(d) in [{core_digits_str}] for d in combo_digits) >= 3",,,,,,,,,,
+LL005,"Eliminate if combo includes ≥3 distinct core digits",True,,"len(set(combo_digits) & set([{core_digits_str}])) >= 3",,,,,,,,,,
+LL005a,"Eliminate if combo includes ≥3 distinct core digits (alternate version)",True,,"len(set(combo_digits) & set([{core_digits_str}])) >= 3",,,,,,,,,,
 """
         st.code(filters_csv, language="csv")
 
