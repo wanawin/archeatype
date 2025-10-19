@@ -1,5 +1,5 @@
-# ✅ Restored visibility for all key data in Loser List app (no logic changes)
-# Shows previous heatmap, current heatmap, loser list, cooled digits, etc.
+# ✅ Restored visibility for all key data in Loser List app (side-by-side layout)
+# Displays full lists: previous heatmap, current heatmap, loser list, cooled digits, etc.
 
 import streamlit as st
 import pandas as pd
@@ -44,26 +44,27 @@ except NameError:
         "previous_map_order": [9, 8, 7, 6, 5, 4, 3, 2, 1, 0]
     }
 
-# === Display Section Restored ===
+# === Display Section Restored (Side-by-Side) ===
 
-st.subheader("📊 Full Data Overview")
+st.subheader("📊 Full Data Overview (Side-by-Side View)")
 
-col1, col2 = st.columns(2)
+col1, col2, col3 = st.columns(3)
 
 with col1:
     st.markdown("### 🔥 Current Heatmap")
-    st.json(curr_heatmap)
+    st.dataframe(pd.DataFrame(list(curr_heatmap.items()), columns=["Digit", "Heat Value"]))
 
     st.markdown("### ❄️ Cooled Digits")
     st.write(cooled_digits)
 
+with col2:
+    st.markdown("### 🕓 Previous Heatmap")
+    st.dataframe(pd.DataFrame(list(prev_heatmap.items()), columns=["Digit", "Heat Value"]))
+
     st.markdown("### 🧩 Loser List 7–9")
     st.write(loser_7_9)
 
-with col2:
-    st.markdown("### 🕓 Previous Heatmap")
-    st.json(prev_heatmap)
-
+with col3:
     st.markdown("### 🧠 Info Object Summary")
     st.json({
         "Core Letters": info.get("core_letters"),
@@ -75,6 +76,4 @@ with col2:
         "Previous Map Order": info.get("previous_map_order"),
     })
 
-# Keep your existing logic intact; this only reveals internal states visually
-
-st.success("All key internal data values are now visible for debugging and verification.")
+st.success("All key internal data values are now visible side-by-side for debugging and verification.")
