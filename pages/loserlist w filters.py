@@ -337,32 +337,19 @@ if st.button("Compute"):
             csv_lines.append(f'{fid},"{name}",True,,"{expr}",,,,,,,,,,')
 
         st.markdown("### 📋 Auto-Generated Filters (copy/paste to tester)")
-st.code("
+        st.code("
 ".join(csv_lines), language="csv")
 
-# NEW: Let user supply the MEGA CSV (or use generated) for export/verification
-st.markdown("### CSV Source for Digits-Only Export")
-use_mega = st.toggle("Use my mega CSV below (recommended)", value=True)
-mega_csv = st.text_area("Paste your MEGA CSV (name,description,expression)", height=180, value="")
-csv_source_text = mega_csv if (use_mega and mega_csv.strip()) else "
+        # NEW: Let user supply the MEGA CSV (or use generated) for export/verification
+        st.markdown("### CSV Source for Digits-Only Export")
+        use_mega = st.toggle("Use my mega CSV below (recommended)", value=True)
+        mega_csv = st.text_area("Paste your MEGA CSV (name,description,expression)", height=180, value="")
+        csv_source_text = mega_csv if (use_mega and mega_csv.strip()) else "
 ".join(csv_lines)
 
-# Render verification + digits-only exporter
-render_export_panel(
-    filters_csv_text=csv_source_text,
-    digit_current_letters=info["digit_current_letters"],
-    digit_prev_letters=info["digit_prev_letters"],
-    prev_core_letters=set(info["core_letters"]),
-    cooled_digits=set(cooled_digits),
-    new_core_digits=set(new_core_digits),
-    loser_7_9=list(loser_7_9),
-)
-
-        # =====================
-        # NEW: Export/Verification Panel (digits-only + state display)
-        # =====================
+        # Render verification + digits-only exporter
         render_export_panel(
-            filters_csv_text="\n".join(csv_lines),
+            filters_csv_text=csv_source_text,
             digit_current_letters=info["digit_current_letters"],
             digit_prev_letters=info["digit_prev_letters"],
             prev_core_letters=set(info["core_letters"]),
