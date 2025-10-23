@@ -1,12 +1,15 @@
-
 # =====================================================
 # loserlist_full.py — Loser List (Least → Most Likely)
 # Full version with complete numeric filter generation
+# + Digits-only Export/Verification Panel (non-destructive add-on)
 # =====================================================
 import streamlit as st
 from collections import Counter
 from typing import List, Dict, Tuple
 import pandas as pd
+
+# NEW: import the non-destructive export/verification panel
+from digits_export_extension import render_export_panel
 
 DIGITS = list("0123456789")
 LETTERS = list("ABCDEFGHIJ")
@@ -67,7 +70,7 @@ def loser_list(last13_mr_to_oldest: List[str]) -> Tuple[List[str], Dict]:
     for back, r in enumerate(curr10):
         for d in DIGITS:
             if age[d] is None and d in r: age[d] = back
-    for d in DIGITS: 
+    for d in DIGITS:
         if age[d] is None: age[d] = 9999
 
     tiers = {d:(3 if digit_to_letter_curr[d] in core_letters else (2 if (digit_to_letter_curr[d] in U and d in due) else (1 if digit_to_letter_curr[d] in U else 0))) for d in DIGITS}
@@ -101,7 +104,7 @@ if st.button("Compute"):
         st.subheader("Loser list (Least → Most Likely)")
         st.code(" ".join(ranking))
 
-        # --- numeric expansions for filters ---
+        # --- numeric expansions for filters (KEEP SEMANTICS AS-IS) ---
         core_digits = [LETTER_TO_NUM[L] for L in info["core_letters"]]
         new_core_digits = [d for d in DIGITS if info["digit_current_letters"][d] not in info["core_letters"]]
         cooled_digits = [d for d in DIGITS if info["rank_curr_map"][d] > info["rank_prev_map"][d]]
@@ -116,7 +119,7 @@ if st.button("Compute"):
         expr_ll007 = "not ('8' in combo_digits)" if f_to_i else "False"
         expr_ll008 = "not ('8' in combo_digits)" if g_to_i else "False"
 
-        # --- full filter list ---
+        # --- full filter list (UNCHANGED) ---
         filters = [
             ("LL001","Eliminate combos with >=3 digits in [0,9,1,2,4]",
              "sum(1 for d in combo_digits if d in ['0','9','1','2','4']) >= 3"),
@@ -153,8 +156,22 @@ if st.button("Compute"):
         csv_lines = ["id,name,enabled,applicable_if,expression,Unnamed:5,Unnamed:6,Unnamed:7,Unnamed:8,Unnamed:9,Unnamed:10,Unnamed:11,Unnamed:12,Unnamed:13,Unnamed:14"]
         for fid,name,expr in filters:
             csv_lines.append(f'{fid},"{name}",True,,"{expr}",,,,,,,,,,')
+
         st.markdown("### 📋 Auto-Generated Filters (copy/paste to tester)")
         st.code("\n".join(csv_lines), language="csv")
+
+        # =====================
+        # NEW: Export/Verification Panel (digits-only + state display)
+        # =====================
+        render_export_panel(
+            filters_csv_text="\n".join(csv_lines),
+            digit_current_letters=info["digit_current_letters"],
+            digit_prev_letters=info["digit_prev_letters"],
+            prev_core_letters=set(info["core_letters"]),
+            cooled_digits=set(cooled_digits),
+            new_core_digits=set(new_core_digits),
+            loser_7_9=list(loser_7_9),
+        )
 
         with st.expander("Details used for numeric mapping"):
             st.write("Core digits:", core_digits)
