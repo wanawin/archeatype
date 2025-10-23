@@ -1,0 +1,15 @@
+name,description,expression
+LL011,Eliminate if loser 7–9 count < 0,sum(1 for d in combo_digits if d in loser_7_9) < 0
+LL011a,Eliminate if loser 7–9 count > 5,sum(1 for d in combo_digits if d in loser_7_9) > 5
+LL011b,Eliminate if loser 7–9 count == 5,sum(1 for d in combo_digits if d in loser_7_9) == 5
+LL011c,Eliminate if loser 7–9 count > 4,sum(1 for d in combo_digits if d in loser_7_9) > 4
+LL011d,Eliminate if loser 7–9 count >= 5,sum(1 for d in combo_digits if d in loser_7_9) >= 5
+LL011e,Eliminate if loser 7–9 count == 4,sum(1 for d in combo_digits if d in loser_7_9) == 4
+LL011f,Eliminate if loser 7–9 count > 3,sum(1 for d in combo_digits if d in loser_7_9) > 3
+LL011g,Eliminate if loser 7–9 count >= 4,sum(1 for d in combo_digits if d in loser_7_9) >= 4
+LL011h,Eliminate if loser 7–9 count < 1,sum(1 for d in combo_digits if d in loser_7_9) < 1
+LL011i,Eliminate if loser 7–9 count <= 0,sum(1 for d in combo_digits if d in loser_7_9) <= 0
+LL011j,Eliminate if loser 7–9 count == 0,sum(1 for d in combo_digits if d in loser_7_9) == 0
+LL011k,Eliminate if loser 7–9 count == 3,sum(1 for d in combo_digits if d in loser_7_9) == 3
+LL011l,Eliminate if loser 7–9 count > 2,sum(1 for d in combo_digits if d in loser_7_9) > 2
+LL011m,Eliminate if loser 7–9 count >= 3,sum(1 for d in combo_digits if d in loser_7_9) >= 3
