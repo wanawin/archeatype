@@ -9,7 +9,6 @@ from typing import List, Dict, Tuple
 import pandas as pd
 
 # NEW: import the non-destructive export/verification panel
-from digits_export_extension import render_export_panel
 
 DIGITS = list("0123456789")
 LETTERS = list("ABCDEFGHIJ")
