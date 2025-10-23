@@ -1,0 +1,15 @@
+name,description,expression
+LL006,Eliminate if core-ring count < 0,sum(1 for d in combo_digits if d in ring_digits) < 0
+LL006a,Eliminate if core-ring count > 5,sum(1 for d in combo_digits if d in ring_digits) > 5
+LL006b,Eliminate if core-ring count < 1,sum(1 for d in combo_digits if d in ring_digits) < 1
+LL006c,Eliminate if core-ring count <= 0,sum(1 for d in combo_digits if d in ring_digits) <= 0
+LL006d,Eliminate if core-ring count == 0,sum(1 for d in combo_digits if d in ring_digits) == 0
+LL006e,Eliminate if core-ring count == 1,sum(1 for d in combo_digits if d in ring_digits) == 1
+LL006f,Eliminate if core-ring count < 2,sum(1 for d in combo_digits if d in ring_digits) < 2
+LL006g,Eliminate if core-ring count <= 1,sum(1 for d in combo_digits if d in ring_digits) <= 1
+LL006h,Eliminate if core-ring count == 2,sum(1 for d in combo_digits if d in ring_digits) == 2
+LL006i,Eliminate if core-ring count < 3,sum(1 for d in combo_digits if d in ring_digits) < 3
+LL006j,Eliminate if core-ring count <= 2,sum(1 for d in combo_digits if d in ring_digits) <= 2
+LL006k,Eliminate if core-ring count == 3,sum(1 for d in combo_digits if d in ring_digits) == 3
+LL006l,Eliminate if core-ring count < 4,sum(1 for d in combo_digits if d in ring_digits) < 4
+LL006m,Eliminate if core-ring count <= 3,sum(1 for d in combo_digits if d in ring_digits) <= 3
