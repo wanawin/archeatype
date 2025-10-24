@@ -22,10 +22,8 @@ def _ring_digits(prev_core_letters: Set[str], digit_current_letters: Dict[str, s
     for L in prev_core_letters:
         if L in LETTERS:
             i = LETTERS.index(L)
-            if i - 1 >= 0:
-                neigh.add(LETTERS[i - 1])
-            if i + 1 < len(LETTERS):
-                neigh.add(LETTERS[i + 1])
+            if i - 1 >= 0: neigh.add(LETTERS[i - 1])
+            if i + 1 < len(LETTERS): neigh.add(LETTERS[i + 1])
     return sorted([d for d, L in digit_current_letters.items() if L in neigh])
 
 def _csv_to_df(csv_text: str) -> pd.DataFrame:
@@ -46,7 +44,6 @@ def _replace_sets(
     ring_digits: List[str],
 ) -> str:
     out = expr
-
     def _fmt(lst: List[str] | Set[str]) -> str:
         return "[" + ",".join("'{}'".format(d) for d in sorted(list(lst))) + "]"
 
@@ -71,7 +68,7 @@ def _replace_sets(
         return p.sub(lambda mm: "True" if mm.group(1) in ref_set else "False", expr_in)
 
     out = _letter_in_set(out, "prev_core_letters", prev_core_letters)
-    out = _letter_in_set(out, "core_letters",       prev_core_letters)  # uses same source in your app
+    out = _letter_in_set(out, "core_letters",       prev_core_letters)  # your code uses same source
     return out
 
 def digits_only_transform(
@@ -107,18 +104,20 @@ def render_export_panel(
 ) -> None:
     st.subheader("Digits-only Filter Export / Verification Panel")
 
+    # Heatmaps up top
     colA, colB = st.columns(2)
     with colA:
-        st.markdown("**Current heatmap (digit -> letter)**")
+        st.markdown("**Current heatmap (digit → letter)**")
         st.dataframe(pd.DataFrame({"digit": DIGITS, "letter": [digit_current_letters[d] for d in DIGITS]}),
                      use_container_width=True, hide_index=True)
     with colB:
-        st.markdown("**Previous heatmap (digit -> letter)**")
+        st.markdown("**Previous heatmap (digit → letter)**")
         st.dataframe(pd.DataFrame({"digit": DIGITS, "letter": [digit_prev_letters[d] for d in DIGITS]}),
                      use_container_width=True, hide_index=True)
 
+    # Derived sets
     ring = _ring_digits(prev_core_letters, digit_current_letters)
-    c1, c2, c3 = st.columns(3)
+    c1,c2,c3 = st.columns(3)
     with c1:
         st.markdown("**prev_core_letters**"); st.code(", ".join(sorted(prev_core_letters)) or "∅")
         st.markdown("**loser_7_9 (digits)**"); st.code(", ".join(loser_7_9) or "∅")
@@ -129,13 +128,9 @@ def render_export_panel(
         st.markdown("**ring_digits (computed, digits)**"); st.code(", ".join(ring) or "∅")
 
     st.divider()
-    st.markdown("**Original CSV (input)** - edit below if you want, then export:")
-    csv_in = st.text_area("filters.csv (name,description,expression)", value=filters_csv_text, height=240)
-
-    out_df = digits_only_transform(csv_in, digit_current_letters, digit_prev_letters,
+    st.markdown("**Digits-only CSV (output)** — copy/paste or download:")
+    out_df = digits_only_transform(filters_csv_text, digit_current_letters, digit_prev_letters,
                                    prev_core_letters, cooled_digits, new_core_digits, loser_7_9)
-
-    st.markdown("**Digits-only CSV (output)** - copy/paste:")
     st.code(out_df.to_csv(index=False), language="csv")
     st.download_button("Download digits-only CSV",
                        data=_df_to_csv_bytes(out_df),
@@ -143,7 +138,7 @@ def render_export_panel(
                        mime="text/csv")
 # --- END: digits-only export panel (inline helper) ---
 
-# ===== App page logic (unchanged semantics) =====
+# ===== Your original page logic (unchanged semantics) =====
 from collections import Counter
 
 st.set_page_config(page_title="Loser List (Least → Most Likely)", layout="wide")
@@ -151,8 +146,7 @@ st.title("Loser List (Least → Most Likely) — ±1 Neighborhood Method")
 
 def heat_order(rows10: List[List[str]]) -> List[str]:
     c = Counter(d for r in rows10 for d in r)
-    for d in DIGITS:
-        c.setdefault(d, 0)
+    for d in DIGITS: c.setdefault(d, 0)
     return sorted(DIGITS, key=lambda d: (-c[d], d))
 
 def rank_of_digit(order: List[str]) -> Dict[str, int]:
@@ -221,20 +215,26 @@ def loser_list(last13_mr_to_oldest: List[str]) -> Tuple[List[str], Dict]:
         "ranking": ranking
     }
 
+# Sidebar (same switches)
 with st.sidebar:
     st.header("Input")
     pad4 = st.checkbox("Pad 4-digit entries", value=True)
     example_btn = st.button("Load example")
-if example_btn:
-    winners_text = "74650,78845,88231,19424,37852,91664,33627,95465,53502,41621,05847,35515,81921"
-else:
-    winners_text = st.text_area("13 winners (MR→Oldest)", height=140)
 
-if st.button("Compute"):
+# Winners form (prevents resets while typing)
+with st.form("winners_form", clear_on_submit=False):
+    if example_btn:
+        st.session_state["winners_text"] = "74650,78845,88231,19424,37852,91664,33627,95465,53502,41621,05847,35515,81921"
+    winners_text = st.text_area("13 winners (MR→Oldest)", key="winners_text", height=140)
+    compute_clicked = st.form_submit_button("Compute")
+
+if compute_clicked:
     try:
-        winners = parse_winners_text(winners_text, pad4=pad4)[:13]
+        winners = parse_winners_text(st.session_state["winners_text"], pad4=pad4)[:13]
         ranking, info = loser_list(winners)
 
+        # Store in session so the CSV build form can use it without recompute
+        st.session_state["info"] = info
         st.subheader("Loser list (Least → Most Likely)")
         st.code(" ".join(ranking))
 
@@ -245,73 +245,83 @@ if st.button("Compute"):
         cooled_digits    = [d for d in DIGITS if info["rank_curr_map"][d] > info["rank_prev_map"][d]]
         loser_7_9        = info["ranking"][7:10]
 
-        def moved(prevL, currL):
-            prev_digit = next((d for d in DIGITS if info["digit_prev_letters"][d] == prevL), None)
-            return (prev_digit and info["digit_current_letters"][prev_digit] == currL)
-        f_to_i, g_to_i = moved('F','I'), moved('G','I')
+        st.session_state["core_digits"]     = core_digits
+        st.session_state["new_core_digits"] = new_core_digits
+        st.session_state["cooled_digits"]   = cooled_digits
+        st.session_state["loser_7_9"]       = loser_7_9
 
-        def literal(seq): return "[" + ",".join(f"'{x}'" for x in seq) + "]"
-        expr_ll007 = "not ('8' in combo_digits)" if f_to_i else "False"
-        expr_ll008 = "not ('8' in combo_digits)" if g_to_i else "False"
+        # Always show INFO panel here
+        st.markdown("### Verification: maps and derived sets")
+        colA, colB = st.columns(2)
+        with colA:
+            st.markdown("**Current heatmap (digit → letter)**")
+            st.dataframe(pd.DataFrame({"digit": DIGITS, "letter": [info["digit_current_letters"][d] for d in DIGITS]}),
+                         use_container_width=True, hide_index=True)
+        with colB:
+            st.markdown("**Previous heatmap (digit → letter)**")
+            st.dataframe(pd.DataFrame({"digit": DIGITS, "letter": [info["digit_prev_letters"][d] for d in DIGITS]}),
+                         use_container_width=True, hide_index=True)
+        c1,c2,c3 = st.columns(3)
+        with c1:
+            st.markdown("**prev_core_letters**"); st.code(", ".join(sorted(info["core_letters"])) or "∅")
+            st.markdown("**loser_7_9 (digits)**");  st.code(", ".join(loser_7_9) or "∅")
+        with c2:
+            st.markdown("**cooled_digits (digits)**");   st.code(", ".join(sorted(cooled_digits)) or "∅")
+            st.markdown("**new_core_digits (digits)**"); st.code(", ".join(sorted(new_core_digits)) or "∅")
+        with c3:
+            ring = _ring_digits(set(info["core_letters"]), info["digit_current_letters"])
+            st.markdown("**ring_digits (computed, digits)**"); st.code(", ".join(ring) or "∅")
 
-        # --- sample filter list shown by this page (your mega list can be pasted below) ---
+        # Build a small demo CSV (only shown if user selects it below)
         filters = [
             ("LL001","Eliminate combos with >=3 digits in [0,9,1,2,4]",
              "sum(1 for d in combo_digits if d in ['0','9','1','2','4']) >= 3"),
             ("LL001A","Eliminate combos with no core digits",
-             f"sum(1 for d in combo_digits if d in {literal(core_digits)}) == 0"),
+             f"sum(1 for d in combo_digits if d in {core_digits}) == 0"),
             ("LL001B","Eliminate combos with <=2 core digits",
-             f"sum(1 for d in combo_digits if d in {literal(core_digits)}) <= 2"),
+             f"sum(1 for d in combo_digits if d in {core_digits}) <= 2"),
             ("LL002","Eliminate combos with <2 of loser list 7–9",
-             f"sum(1 for d in combo_digits if d in {literal(loser_7_9)}) < 2"),
+             f"sum(1 for d in combo_digits if d in {loser_7_9}) < 2"),
             ("LL003","Eliminate combos missing >=3 new-core digits",
-             f"sum(1 for d in combo_digits if d in {literal(new_core_digits)}) >= 3"),
+             f"sum(1 for d in combo_digits if d in {new_core_digits}) >= 3"),
             ("LL004","Eliminate combos including J(9) unless prev had J",
              "('9' in combo_digits) and not ('9' in seed_digits)"),
             ("LL004R","Eliminate combos with >=2 new-core digits",
-             f"sum(1 for d in combo_digits if d in {literal(new_core_digits)}) >= 2"),
-            ("LL005","Eliminate combos missing B or E core digits",
-             f"not any(d in combo_digits for d in {literal([LETTER_TO_NUM['B'],LETTER_TO_NUM['E']])})"),
+             f"sum(1 for d in combo_digits if d in {new_core_digits}) >= 2"),
             ("LL005B","Eliminate combos missing loser list 7–9 entirely",
-             f"sum(1 for d in combo_digits if d in {literal(loser_7_9)}) == 0"),
-            ("LL007","If prev heatmap F→I, require I(8)",expr_ll007),
-            ("LL008","If prev heatmap G→I, require I(8)",expr_ll008),
+             f"sum(1 for d in combo_digits if d in {loser_7_9}) == 0"),
             ("LL009","Eliminate if cooled digit repeats",
-             f"any(combo_digits.count(d)>1 for d in {literal(cooled_digits)})"),
+             f"any(combo_digits.count(d)>1 for d in {cooled_digits})"),
         ]
-
-        # Build the small CSV text (demo list only)
-        csv_lines = ["id,name,enabled,applicable_if,expression,Unnamed:5,Unnamed:6,Unnamed:7,Unnamed:8,Unnamed:9,Unnamed:10,Unnamed:11,Unnamed:12,Unnamed:13,Unnamed:14"]
-        for fid,name,expr in filters:
-            csv_lines.append(f'{fid},"{name}",True,,"{expr}",,,,,,,,,,')
-
-        st.markdown("### 📋 Auto-Generated Filters (copy/paste to tester)")
-        csv_text_small = "\n".join(csv_lines)
-        st.code(csv_text_small, language="csv")
-
-        # --- Use mega CSV (your full selected list) OR the small one above ---
-        st.markdown("### CSV Source for Digits-Only Export")
-        use_mega = st.toggle("Use my mega CSV below (recommended)", value=True)
-        mega_csv = st.text_area("Paste your MEGA CSV (name,description,expression)", height=180, value="")
-        csv_source_text = mega_csv if (use_mega and mega_csv.strip()) else csv_text_small
-
-        # Render verification + digits-only exporter
-        render_export_panel(
-            filters_csv_text=csv_source_text,
-            digit_current_letters=info["digit_current_letters"],
-            digit_prev_letters=info["digit_prev_letters"],
-            prev_core_letters=set(info["core_letters"]),   # same source you use today
-            cooled_digits=set(cooled_digits),
-            new_core_digits=set(new_core_digits),
-            loser_7_9=list(loser_7_9),
-        )
-
-        with st.expander("Details used for numeric mapping"):
-            st.write("Core digits:", core_digits)
-            st.write("New-core digits:", new_core_digits)
-            st.write("Cooled digits:", cooled_digits)
-            st.write("Loser list 7–9:", loser_7_9)
-            st.write("F→I:", f_to_i, " | G→I:", g_to_i)
+        csv_lines = ["name,description,expression"]
+        for name,desc,expr in filters:
+            csv_lines.append(f'{name},"{desc}","{expr}"')
+        st.session_state["csv_text_small"] = "\n".join(csv_lines)
 
     except Exception as e:
         st.error(str(e))
+
+# CSV source form (separate submit; won’t reset while typing)
+if "info" in st.session_state:
+    st.markdown("### CSV Source for Digits-Only Export")
+    with st.form("csv_form", clear_on_submit=False):
+        source = st.radio("Choose source", ["Use my MEGA CSV (paste below)", "Use small demo list"], index=0)
+        st.text_area("Paste your MEGA CSV (name,description,expression)",
+                     key="mega_csv", height=180, value=st.session_state.get("mega_csv",""))
+        build_clicked = st.form_submit_button("Build digits-only CSV")
+
+    if build_clicked:
+        csv_source_text = (st.session_state.get("mega_csv","").strip()
+                           if source.startswith("Use my MEGA")
+                           else st.session_state.get("csv_text_small","name,description,expression"))
+        render_export_panel(
+            filters_csv_text=csv_source_text,
+            digit_current_letters=st.session_state["info"]["digit_current_letters"],
+            digit_prev_letters=st.session_state["info"]["digit_prev_letters"],
+            prev_core_letters=set(st.session_state["info"]["core_letters"]),
+            cooled_digits=set(st.session_state["cooled_digits"]),
+            new_core_digits=set(st.session_state["new_core_digits"]),
+            loser_7_9=list(st.session_state["loser_7_9"]),
+        )
+else:
+    st.info("Enter winners and click **Compute** first. Then you can paste your MEGA CSV and build the digits-only export.")
