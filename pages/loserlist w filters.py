@@ -26,8 +26,71 @@ def _ring_digits(prev_core_letters: Set[str], digit_current_letters: Dict[str, s
             if i + 1 < len(LETTERS): neigh.add(LETTERS[i + 1])
     return sorted([d for d, L in digit_current_letters.items() if L in neigh])
 
-def _csv_to_df(csv_text: str) -> pd.DataFrame:
-    return pd.read_csv(io.StringIO(csv_text), header=0)
+def _robust_csv_to_df(csv_text: str) -> pd.DataFrame:
+    """Accepts either 3-col (name,description,expression) or Tester-style CSV with id/name/enabled/.../expression.
+    Handles smart quotes, mixed newlines, and common separators; skips truly broken lines."""
+    txt = (csv_text or "")
+    # normalize quotes/newlines
+    txt = (txt.replace("\u201c", '"')
+              .replace("\u201d", '"')
+              .replace("\u2018", "'")
+              .replace("\u2019", "'"))
+    txt = txt.replace("\r\n", "\n").replace("\r", "\n")
+
+    last_err = None
+    for sep in [",", ";", "\t", "|"]:
+        try:
+            df = pd.read_csv(
+                io.StringIO(txt),
+                sep=sep,
+                engine="python",
+                quotechar='"',
+                escapechar="\\",
+                dtype=str,
+                on_bad_lines="skip",
+            )
+            break
+        except Exception as e:
+            last_err = e
+            df = None
+    if df is None:
+        raise last_err
+
+    df.columns = [str(c).strip().lower() for c in df.columns]
+    df = df.fillna("")
+    cols = set(df.columns)
+
+    def pick(*names):
+        for n in names:
+            if n in cols:
+                return n
+        return None
+
+    # If already 3 good columns:
+    if {"name", "description", "expression"}.issubset(cols) and "id" not in cols:
+        out = df[["name", "description", "expression"]].copy()
+        return out[out["expression"].astype(str).str.strip() != ""].reset_index(drop=True)
+
+    # Map Tester-style → 3 columns
+    id_col   = pick("id", "code", "filterid")
+    name_col = pick("name", "title", "label")
+    desc_col = pick("description", "desc", "details")
+    expr_col = pick("expression", "expr", "formula")
+
+    if not expr_col:
+        raise ValueError("No 'expression' column found. Include a column named 'expression'.")
+
+    name_vals = df[id_col] if id_col else df[name_col] if name_col else pd.Series([""] * len(df))
+    desc_vals = (df[name_col] if (id_col and name_col) else
+                 df[desc_col] if desc_col else pd.Series([""] * len(df)))
+
+    out = pd.DataFrame({
+        "name": name_vals.astype(str).str.strip(),
+        "description": desc_vals.astype(str).str.strip(),
+        "expression": df[expr_col].astype(str).str.strip(),
+    })
+    out = out[out["expression"] != ""]
+    return out.reset_index(drop=True)
 
 def _df_to_csv_bytes(df: pd.DataFrame) -> bytes:
     buf = io.StringIO()
@@ -44,10 +107,11 @@ def _replace_sets(
     ring_digits: List[str],
 ) -> str:
     out = expr
+
     def _fmt(lst: List[str] | Set[str]) -> str:
         return "[" + ",".join("'{}'".format(d) for d in sorted(list(lst))) + "]"
 
-    # Replace set names used in membership tests with digit lists
+    # Replace simple set names with digit lists
     out = re.sub(r"\bin\s+cooled_digits\b",   " in {}".format(_fmt(cooled_digits)), out)
     out = re.sub(r"\bin\s+new_core_digits\b", " in {}".format(_fmt(new_core_digits)), out)
     out = re.sub(r"\bin\s+loser_7_9\b",       " in {}".format(_fmt(loser_7_9)), out)
@@ -62,13 +126,13 @@ def _replace_sets(
         return "{} in [{}]".format(var_d, ",".join("'{}'".format(x) for x in digits))
     out = pat.sub(_sub, out)
 
-    # Replace `'X' in prev_core_letters` / `core_letters` with True/False
+    # Replace "'X' in prev_core_letters/core_letters" → True/False
     def _letter_in_set(expr_in: str, varname: str, ref_set: Set[str]) -> str:
         p = re.compile(r"'([A-J])'\s+in\s+{}".format(varname))
         return p.sub(lambda mm: "True" if mm.group(1) in ref_set else "False", expr_in)
 
     out = _letter_in_set(out, "prev_core_letters", prev_core_letters)
-    out = _letter_in_set(out, "core_letters",       prev_core_letters)  # your code uses same source
+    out = _letter_in_set(out, "core_letters",       prev_core_letters)
     return out
 
 def digits_only_transform(
@@ -82,9 +146,9 @@ def digits_only_transform(
 ) -> pd.DataFrame:
     digits_by_letter_curr = _digits_by_letter(digit_current_letters)
     ring = _ring_digits(prev_core_letters, digit_current_letters)
-    df = _csv_to_df(csv_text)
+    df_in = _robust_csv_to_df(csv_text)
     rows = []
-    for _, row in df.iterrows():
+    for _, row in df_in.iterrows():
         name = str(row.get("name", "")).strip()
         desc = str(row.get("description", "")).strip()
         expr = str(row.get("expression", ""))
@@ -104,7 +168,7 @@ def render_export_panel(
 ) -> None:
     st.subheader("Digits-only Filter Export / Verification Panel")
 
-    # Heatmaps up top
+    # Heatmaps
     colA, colB = st.columns(2)
     with colA:
         st.markdown("**Current heatmap (digit → letter)**")
@@ -115,9 +179,9 @@ def render_export_panel(
         st.dataframe(pd.DataFrame({"digit": DIGITS, "letter": [digit_prev_letters[d] for d in DIGITS]}),
                      use_container_width=True, hide_index=True)
 
-    # Derived sets
+    # Sets
     ring = _ring_digits(prev_core_letters, digit_current_letters)
-    c1,c2,c3 = st.columns(3)
+    c1, c2, c3 = st.columns(3)
     with c1:
         st.markdown("**prev_core_letters**"); st.code(", ".join(sorted(prev_core_letters)) or "∅")
         st.markdown("**loser_7_9 (digits)**"); st.code(", ".join(loser_7_9) or "∅")
@@ -138,7 +202,7 @@ def render_export_panel(
                        mime="text/csv")
 # --- END: digits-only export panel (inline helper) ---
 
-# ===== Your original page logic (unchanged semantics) =====
+# ===== Your page logic (unchanged semantics; now form-driven & sticky) =====
 from collections import Counter
 
 st.set_page_config(page_title="Loser List (Least → Most Likely)", layout="wide")
@@ -215,13 +279,13 @@ def loser_list(last13_mr_to_oldest: List[str]) -> Tuple[List[str], Dict]:
         "ranking": ranking
     }
 
-# Sidebar (same switches)
+# Sidebar
 with st.sidebar:
     st.header("Input")
     pad4 = st.checkbox("Pad 4-digit entries", value=True)
     example_btn = st.button("Load example")
 
-# Winners form (prevents resets while typing)
+# Winners form (prevents reset while typing)
 with st.form("winners_form", clear_on_submit=False):
     if example_btn:
         st.session_state["winners_text"] = "74650,78845,88231,19424,37852,91664,33627,95465,53502,41621,05847,35515,81921"
@@ -233,12 +297,11 @@ if compute_clicked:
         winners = parse_winners_text(st.session_state["winners_text"], pad4=pad4)[:13]
         ranking, info = loser_list(winners)
 
-        # Store in session so the CSV build form can use it without recompute
         st.session_state["info"] = info
         st.subheader("Loser list (Least → Most Likely)")
         st.code(" ".join(ranking))
 
-        # Numeric expansions for filters (KEEP SEMANTICS AS-IS)
+        # Derived numeric sets for filters (keep semantics)
         LETTER_TO_NUM = {'A':0,'B':1,'C':2,'D':3,'E':4,'F':5,'G':6,'H':7,'I':8,'J':9}
         core_digits      = [LETTER_TO_NUM[L] for L in info["core_letters"]]
         new_core_digits  = [d for d in DIGITS if info["digit_current_letters"][d] not in info["core_letters"]]
@@ -250,7 +313,7 @@ if compute_clicked:
         st.session_state["cooled_digits"]   = cooled_digits
         st.session_state["loser_7_9"]       = loser_7_9
 
-        # Always show INFO panel here
+        # Always show verification info after Compute
         st.markdown("### Verification: maps and derived sets")
         colA, colB = st.columns(2)
         with colA:
@@ -261,7 +324,7 @@ if compute_clicked:
             st.markdown("**Previous heatmap (digit → letter)**")
             st.dataframe(pd.DataFrame({"digit": DIGITS, "letter": [info["digit_prev_letters"][d] for d in DIGITS]}),
                          use_container_width=True, hide_index=True)
-        c1,c2,c3 = st.columns(3)
+        c1, c2, c3 = st.columns(3)
         with c1:
             st.markdown("**prev_core_letters**"); st.code(", ".join(sorted(info["core_letters"])) or "∅")
             st.markdown("**loser_7_9 (digits)**");  st.code(", ".join(loser_7_9) or "∅")
@@ -272,7 +335,7 @@ if compute_clicked:
             ring = _ring_digits(set(info["core_letters"]), info["digit_current_letters"])
             st.markdown("**ring_digits (computed, digits)**"); st.code(", ".join(ring) or "∅")
 
-        # Build a small demo CSV (only shown if user selects it below)
+        # Build a small demo CSV (only used if user selects it later)
         filters = [
             ("LL001","Eliminate combos with >=3 digits in [0,9,1,2,4]",
              "sum(1 for d in combo_digits if d in ['0','9','1','2','4']) >= 3"),
@@ -301,7 +364,7 @@ if compute_clicked:
     except Exception as e:
         st.error(str(e))
 
-# CSV source form (separate submit; won’t reset while typing)
+# CSV source form (separate submit; stable while typing)
 if "info" in st.session_state:
     st.markdown("### CSV Source for Digits-Only Export")
     with st.form("csv_form", clear_on_submit=False):
