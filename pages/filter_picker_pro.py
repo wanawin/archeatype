@@ -20,7 +20,7 @@ st.set_page_config(page_title="Filter Picker (Hybrid I/O) — Advanced", layout=
 def init_state():
     ss = st.session_state
     ss.setdefault("filters_df", None)            # master filters [id, name, expression]
-    ss.setdefault("history_winners", [])         # list[str] 5-digit winners (ordered by chronology toggle)
+    ss.setdefault("history_winners", [])         # list[str] 5-digit winners
     ss.setdefault("pool_combos", [])             # list[str] current pool 5-digit combos
     ss.setdefault("seed_str", "")
     ss.setdefault("chronology", "Newest → Oldest")
@@ -31,6 +31,7 @@ def init_state():
     ss.setdefault("fired_on_pool", dict())       # id -> set(indexes eliminated)
     ss.setdefault("last_compute_ts", None)
     ss.setdefault("bundle_result", None)         # dict with bundle info
+    ss.setdefault("applicable_ids_raw", "")
 
 init_state()
 
@@ -45,8 +46,7 @@ def parse_pool_text(text: str) -> List[str]:
         return [p for p in parts if len(p) == 5 and p.isdigit()]
     return re.findall(r"(?<!\d)(\d{5})(?!\d)", text)
 
-def parse_history_file(file: st.runtime.uploaded_file_manager.UploadedFile,
-                       chronology_label: str) -> List[str]:
+def parse_history_file(file, chronology_label: str) -> List[str]:
     raw = file.read()
     try:
         text = raw.decode("utf-8", errors="ignore")
@@ -55,7 +55,7 @@ def parse_history_file(file: st.runtime.uploaded_file_manager.UploadedFile,
     winners = re.findall(r"(?<!\d)(\d{5})(?!\d)", text)
     return winners if chronology_label == "Newest → Oldest" else winners[::-1]
 
-def load_filters_csv(file: st.runtime.uploaded_file_manager.UploadedFile) -> pd.DataFrame:
+def load_filters_csv(file) -> pd.DataFrame:
     df = pd.read_csv(file, dtype=str, keep_default_na=False)
     dcl = {c.lower(): c for c in df.columns}
     def has(*cols): return all(c in dcl for c in cols)
@@ -63,14 +63,13 @@ def load_filters_csv(file: st.runtime.uploaded_file_manager.UploadedFile) -> pd.
     if has("id", "name", "expression"):
         return df.rename(columns={dcl["id"]:"id", dcl["name"]:"name", dcl["expression"]:"expression"})[["id","name","expression"]]
 
-    # Try to guess
+    # Try to guess expression column
     expr_col = None
     for c in df.columns:
         sample = " ".join(df[c].astype(str).head(25).tolist())
         if any(tok in sample for tok in ["sum(", "any(", "all(", "combo_digits", "seed_digits", "ord("]):
             expr_col = c; break
     if expr_col is None:
-        # fallback first 3 cols
         cols = list(df.columns)
         take = cols[:3] if len(cols)>=3 else cols + ["", ""]
         out = pd.DataFrame({
@@ -88,6 +87,11 @@ def load_filters_csv(file: st.runtime.uploaded_file_manager.UploadedFile) -> pd.
         "name": df[name_col].astype(str),
         "expression": df[expr_col].astype(str)
     })
+
+def parse_applicable_ids(text: str) -> Set[str]:
+    if not text.strip(): return set()
+    parts = re.split(r"[,\s]+", text.strip())
+    return {p.strip() for p in parts if p.strip()}
 
 # =============================
 # Eval environment
@@ -157,7 +161,6 @@ def compute_scores(filters_df: pd.DataFrame,
     winners_fire_sets: Dict[str,Set[int]] = {}
     pool_fire_sets: Dict[str,Set[int]] = {}
 
-    # Pre-materialize arrays for speed
     for _, row in df.iterrows():
         fid = row["id"]; expr = row["expression"]
 
@@ -172,11 +175,8 @@ def compute_scores(filters_df: pd.DataFrame,
                 kept_weight += (w_w[i] if Nw>0 else 1.0)
         winners_fire_sets[fid] = fired_ix
         if Nw > 0:
-            keep = kept_weight if Nw>0 else (Nw-len(fired_ix))
-            # Convert kept_weight (already normalized sum=1) back to rate:
             k_rate = kept_weight if Nw>0 else (Nw-len(fired_ix))/Nw
             keep_rate.append(k_rate)
-            # For CI we approximate with unweighted counts (OK as a quick safety band)
             lo, hi = wilson_ci(Nw-len(fired_ix), Nw)
             keep_lo.append(lo); keep_hi.append(hi)
         else:
@@ -214,12 +214,6 @@ def build_bundle(scored: pd.DataFrame,
                  min_survival: float,
                  target_survivors: Optional[int],
                  redundancy_penalty: float = 0.5) -> Dict:
-    """
-    Greedy forward selection:
-      - pick filters while union-of-winner-elims keeps weighted survival ≥ min_survival
-      - stop when projected survivors <= target_survivors (if given)
-      - prefer low-redundancy by demoting filters with high max Jaccard vs already chosen
-    """
     if scored.empty:
         return {"selected": [], "survival": 0.0, "survivors": None, "history": []}
 
@@ -228,16 +222,13 @@ def build_bundle(scored: pd.DataFrame,
     selected_union_p = set()
     history_steps = []
 
-    # Precompute arrays for speed
     ids = scored["id"].tolist()
 
     def weighted_survival(union_elims_w: Set[int]) -> float:
         if N_winners == 0: return 0.0
         if w_weights.size == 0:
-            # unweighted
             return 1.0 - (len(union_elims_w) / N_winners)
         else:
-            # weighted by removing eliminated mass
             mask = np.ones(N_winners, dtype=bool)
             if union_elims_w:
                 idx = np.fromiter(union_elims_w, dtype=int)
@@ -245,12 +236,11 @@ def build_bundle(scored: pd.DataFrame,
             kept_mass = w_weights[mask].sum()
             return kept_mass
 
-    current_survival = weighted_survival(selected_union_w)
-    # Survivors on pool:
     def projected_survivors(union_elims_p: Set[int], pool_size: int) -> int:
         return pool_size - len(union_elims_p)
 
     pool_size = max(0, max([max(s) if s else -1 for s in pool_fire_sets.values()] + [-1]) + 1)
+    current_survival = weighted_survival(selected_union_w)
 
     while True:
         best_id = None
@@ -264,10 +254,10 @@ def build_bundle(scored: pd.DataFrame,
             cand_union_w = selected_union_w | winners_fire_sets.get(fid, set())
             cand_union_p = selected_union_p | pool_fire_sets.get(fid, set())
             cand_survival = weighted_survival(cand_union_w)
-            if cand_survival < min_survival:   # respect survival constraint
+            if cand_survival < min_survival:
                 continue
 
-            # Redundancy penalty: max jaccard vs already chosen (on winners)
+            # Redundancy penalty on eliminated-winner overlap
             if selected:
                 max_j = 0.0
                 S = winners_fire_sets.get(fid, set())
@@ -276,9 +266,8 @@ def build_bundle(scored: pd.DataFrame,
             else:
                 max_j = 0.0
 
-            # Base objective: improve thinning with low redundancy
             delta_thin = len(cand_union_p) - len(selected_union_p)
-            score = delta_thin - redundancy_penalty * max_j * len(cand_union_p)  # demote perfect overlap
+            score = delta_thin - redundancy_penalty * max_j * len(cand_union_p)
 
             if score > best_score:
                 best_score = score
@@ -288,32 +277,18 @@ def build_bundle(scored: pd.DataFrame,
                 best_union_p = cand_union_p
 
         if best_id is None:
-            break  # No candidate respects the survival threshold
+            break
 
-        # Accept the best candidate
         selected.append(best_id)
         selected_union_w = best_union_w
         selected_union_p = best_union_p
         current_survival = best_survival
 
-        # Stop early if we hit the target survivors
-        if target_survivors is not None:
-            cur_survivors = projected_survivors(selected_union_p, pool_size)
-            history_steps.append({
-                "added": best_id,
-                "survival": current_survival,
-                "survivors": cur_survivors
-            })
-            if cur_survivors <= target_survivors:
-                break
-        else:
-            history_steps.append({
-                "added": best_id,
-                "survival": current_survival,
-                "survivors": projected_survivors(selected_union_p, pool_size)
-            })
+        cur_survivors = projected_survivors(selected_union_p, pool_size)
+        history_steps.append({"added": best_id, "survival": current_survival, "survivors": cur_survivors})
 
-        # No more candidates? loop will end
+        if target_survivors is not None and cur_survivors <= target_survivors:
+            break
 
     return {
         "selected": selected,
@@ -323,7 +298,7 @@ def build_bundle(scored: pd.DataFrame,
     }
 
 # =============================
-# UI: Title + explainer
+# UI
 # =============================
 st.title("Filter Picker (Hybrid I/O) — Advanced Scoring")
 
@@ -331,33 +306,40 @@ with st.expander("How to use"):
     st.markdown("""
 1) **Paste current pool** (comma-separated or continuous digits).  
 2) **Upload master filter CSV** (must contain a Python `expression` column; `id` and `name` are detected).  
-3) **Upload history** (CSV/TXT with any 5-digit winners); choose **chronology**.  
-4) Set **Seed**, **WPP α**, and optional **time-decay** γ (newest winners weigh more).  
-5) Click **Compute** for per-filter metrics, Pareto plot, redundancy, and the **Greedy Bundle** that
-   maximizes thinning while keeping survival ≥ your threshold and hitting a target survivor count.
+3) (Optional) **Paste applicable filter IDs** to limit to a subset (comma/space/newline separated).  
+4) **Upload history** (CSV/TXT with any 5-digit winners); choose **chronology**.  
+5) Set **Seed**, **WPP α**, and optional **time-decay** γ.  
+6) Click **RUN** (or the Compute button) to score filters. Use the **Greedy bundle** builder to pick a set.
 """)
 
-# =============================
-# UI: Inputs
-# =============================
-c1, c2, c3, c4 = st.columns([1.8, 1.0, 1.0, 1.0])
+# Inputs
+top_l, top_r = st.columns([1.6, 1.0])
 
-with c1:
+with top_l:
     pool_text = st.text_area(
         "Paste current pool (commas or continuous)",
-        height=220,
+        height=180,
         placeholder="88001,87055,04510,…  or a single blob like 8800187055…"
     )
-with c2:
+    applicable_ids_raw = st.text_area(
+        "Paste applicable filter IDs (optional — comma/space/newline-separated)",
+        value=st.session_state.applicable_ids_raw,
+        height=120,
+        placeholder="LL002, LL002a, LL004d  (or one per line)"
+    )
+    st.session_state.applicable_ids_raw = applicable_ids_raw
+
+with top_r:
     chronology = st.radio("History chronology", ["Newest → Oldest", "Oldest → Newest"])
-with c3:
     seed_str = st.text_input("Seed (last 5 digits)", value=st.session_state.seed_str, max_chars=5)
-with c4:
     alpha = st.slider("WPP α (thin weight)", 0.2, 2.0, float(st.session_state.alpha_wpp), 0.1)
+    gamma = st.slider("Time-decay γ (history)", 0.0, 0.10, float(st.session_state.gamma_decay), 0.01,
+                      help="Higher γ ⇒ newer winners get more weight")
 
 st.session_state.chronology = chronology
 st.session_state.seed_str = re.sub(r"\D","",seed_str)[:5]
 st.session_state.alpha_wpp = alpha
+st.session_state.gamma_decay = gamma
 
 u1, u2, u3 = st.columns([1,1,1])
 with u1:
@@ -365,10 +347,10 @@ with u1:
 with u2:
     history_file = st.file_uploader("Upload winners history (CSV or TXT)", type=["csv","txt"])
 with u3:
-    gamma = st.slider("Time-decay γ (history)", 0.0, 0.10, float(st.session_state.gamma_decay), 0.01,
-                      help="Higher γ ⇒ newer winners get more weight")
-st.session_state.gamma_decay = gamma
+    st.write("")  # spacer
+    run_clicked = st.button("🚀 RUN", type="primary", use_container_width=True)
 
+# Persist uploads
 if pool_text:
     st.session_state.pool_combos = parse_pool_text(pool_text)
 if filters_file is not None:
@@ -380,16 +362,14 @@ if history_file is not None:
 st.markdown("---")
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("Parsed pool size", len(st.session_state.pool_combos))
-m2.metric("Filters", 0 if st.session_state.filters_df is None else len(st.session_state.filters_df))
+m2.metric("Filters (master)", 0 if st.session_state.filters_df is None else len(st.session_state.filters_df))
 m3.metric("History rows", len(st.session_state.history_winners))
 m4.metric("Seed", st.session_state.seed_str if st.session_state.seed_str else "—")
 
-# =============================
-# Compute
-# =============================
-go = st.button("Compute per-filter metrics", type="primary", use_container_width=True)
+# Compute trigger
+compute_clicked = run_clicked or st.button("Compute per-filter metrics", use_container_width=True)
 
-if go:
+if compute_clicked:
     if not st.session_state.pool_combos:
         st.warning("Please paste the current pool.")
     elif st.session_state.filters_df is None or st.session_state.filters_df.empty:
@@ -399,9 +379,16 @@ if go:
     elif not st.session_state.seed_str or len(st.session_state.seed_str) != 5:
         st.warning("Please enter a 5-digit seed.")
     else:
+        # Limit to applicable IDs if provided
+        use_df = st.session_state.filters_df.copy()
+        subset_ids = parse_applicable_ids(st.session_state.applicable_ids_raw)
+        if subset_ids:
+            use_df = use_df[use_df["id"].astype(str).isin(subset_ids)].reset_index(drop=True)
+            if use_df.empty:
+                st.error("None of the pasted IDs matched the master CSV.")
         with st.spinner("Evaluating filters…"):
             res, w_sets, p_sets = compute_scores(
-                st.session_state.filters_df,
+                use_df,
                 st.session_state.pool_combos,
                 st.session_state.history_winners,
                 st.session_state.seed_str,
@@ -413,12 +400,10 @@ if go:
             st.session_state.fired_on_pool = p_sets
             st.session_state.last_compute_ts = time.time()
 
-# =============================
-# Results: per-filter table + Pareto
-# =============================
+# Results: table + Pareto
 st.markdown("### Per-filter metrics")
 if st.session_state.result_df is None or st.session_state.result_df.empty:
-    st.info("No results yet. Provide inputs and click **Compute**.")
+    st.info("No results yet. Provide inputs and click **RUN** (or **Compute**).")
 else:
     df = st.session_state.result_df.copy()
     show_cols = ["id","name","keep_rate","keep_lo","keep_hi","elim_rate","WPP","expression"]
@@ -432,7 +417,6 @@ else:
 
     st.dataframe(df[show_cols], hide_index=True, use_container_width=True)
 
-    # Pareto: keep_rate vs elim_rate
     chart_df = st.session_state.result_df.copy()
     chart_df["keep%"] = chart_df["keep_rate"]*100
     chart_df["elim%"] = chart_df["elim_rate"]*100
@@ -443,7 +427,6 @@ else:
     ).interactive()
     st.altair_chart(base.properties(height=360), use_container_width=True)
 
-    # Copy & download IDs
     st.markdown("#### Copy / Download (per-filter table)")
     ids_only = "\n".join(chart_df.sort_values("WPP", ascending=False)["id"].astype(str).tolist())
     st.code(ids_only, language="text")
@@ -456,9 +439,7 @@ else:
         st.download_button("Download table (.csv)", buf.getvalue().encode("utf-8"),
                            file_name="filters_scored.csv", use_container_width=True)
 
-# =============================
-# Advanced: Redundancy + Greedy Bundle
-# =============================
+# Advanced bundle
 st.markdown("---")
 st.markdown("## Advanced: Redundancy & Greedy Bundle")
 
@@ -471,10 +452,8 @@ else:
     with adv2:
         target_survivors = st.number_input("Target survivors (bundle)", min_value=0, value=1000, step=10)
     with adv3:
-        red_pen = st.slider("Redundancy penalty (0=off)", 0.0, 1.0, 0.5, 0.05,
-                            help="Demotes filters that overlap heavily with already-chosen ones (Jaccard on eliminated winners)")
+        red_pen = st.slider("Redundancy penalty (0=off)", 0.0, 1.0, 0.5, 0.05)
 
-    # Build bundle
     bgo = st.button("Build greedy bundle", type="primary", use_container_width=True)
 
     if bgo:
@@ -487,13 +466,12 @@ else:
             st.session_state.fired_on_pool,
             Nw,
             w_weights,
-            min_survival=min_survival,
+            min_survival=float(min_survival),
             target_survivors=int(target_survivors),
             redundancy_penalty=float(red_pen)
         )
         st.session_state.bundle_result = bundle
 
-    # Show bundle
     if st.session_state.bundle_result:
         b = st.session_state.bundle_result
         st.markdown("### Selected bundle")
@@ -501,13 +479,10 @@ else:
         st.write(f"**Projected winner survival**: {b['survival']*100:.2f}%")
         st.write(f"**Projected survivors (pool)**: {b['survivors']:,}")
 
-        # Step log
         if b["history"]:
             hdf = pd.DataFrame(b["history"])
             st.dataframe(hdf, hide_index=True, use_container_width=True)
 
-        # Projected survivors list for download
-        # Compute survivors on pool using selected union
         selected_ids = set(b["selected"])
         union_pool = set()
         for fid in selected_ids:
