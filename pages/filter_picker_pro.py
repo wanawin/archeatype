@@ -1,10 +1,11 @@
 # filter_picker_hybrid.py
 # -----------------------------------------------------------
-# Paste applicable filters + paste pool; upload master filter CSV + upload history.
+# Paste applicable filter IDs + paste pool (supports continuous digits),
+# upload master filter CSV and historical winners.
 # Tester-only expressions (no LL variables). Full app, no patches.
 # -----------------------------------------------------------
 
-import io, math, random
+import io, math, random, re
 from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass
 
@@ -19,7 +20,7 @@ DIGITS = [str(i) for i in range(10)]
 
 def to_digits(x) -> List[str]:
     if isinstance(x, str):
-        return list(x.strip().replace(" ", ""))
+        return list(re.sub(r"\s+", "", x))
     return [str(v) for v in x]
 
 def build_ctx(combo: str, seed: str) -> Dict[str, Any]:
@@ -60,23 +61,93 @@ def wilson_ci(k: int, n: int, z: float = 1.96) -> Tuple[float, float]:
     return lo, hi
 
 # ----------------------------
+# Robust parsers (incl. continuous)
+# ----------------------------
+def _chunk_continuous(s: str, size: int = 5) -> List[str]:
+    s = re.sub(r"\D", "", s)  # keep digits only
+    return [s[i:i+size] for i in range(0, len(s) - len(s)%size, size) if len(s[i:i+size]) == size]
+
+def parse_ids(text: str) -> List[str]:
+    if not text or not text.strip():
+        return []
+    # split on newline, comma, semicolon or whitespace
+    parts = re.split(r"[,\s;]+", text.strip())
+    return [p for p in parts if p]
+
+def parse_pool_text(text: str) -> List[str]:
+    if not text or not text.strip():
+        return []
+    raw = text.strip()
+    # If it contains any non-digit separators, split first
+    if re.search(r"[^\d]", raw):
+        # pull out 5-digit tokens anywhere
+        tokens = re.findall(r"\d{5}", raw.replace(",", " ").replace(";", " "))
+        if tokens:
+            return tokens
+        # otherwise, strip non-digits and chunk
+        return _chunk_continuous(raw)
+    # pure digits → chunk into 5s
+    return _chunk_continuous(raw)
+
+def load_list_like(file, colname: str) -> List[str]:
+    """Load winners (or pool) from CSV/TXT. Supports:
+       - single column CSV with 5-digit strings
+       - single cell with continuous digits
+       - TXT with lines or a continuous digit block
+    """
+    if file is None:
+        return []
+    raw = file.read()
+    # try CSV first
+    try:
+        df = pd.read_csv(io.BytesIO(raw))
+        if colname and colname in df.columns:
+            vals = df[colname].astype(str).tolist()
+        else:
+            # if first column looks like one big continuous digit block, handle it
+            series = df.iloc[:,0].astype(str)
+            if len(series) == 1 and re.fullmatch(r"\D*\d+\D*", series.iloc[0] or ""):
+                return _chunk_continuous(series.iloc[0])
+            vals = series.tolist()
+        # extract any 5-digit tokens per cell
+        out: List[str] = []
+        for v in vals:
+            toks = re.findall(r"\d{5}", str(v))
+            if toks:
+                out.extend(toks)
+        if out:
+            return out
+        # fallback: treat concatenation as continuous
+        return _chunk_continuous("".join(vals))
+    except Exception:
+        # not a CSV → plain text
+        txt = io.BytesIO(raw).read().decode("utf-8", errors="ignore").strip()
+        # prefer 5-digit tokens if present
+        tokens = re.findall(r"\d{5}", txt)
+        if tokens:
+            return tokens
+        return _chunk_continuous(txt)
+
+# ----------------------------
 # UI
 # ----------------------------
 st.set_page_config(page_title="Filter Picker (Hybrid I/O)", layout="wide")
 st.title("Filter Picker — Hybrid I/O (paste pool & IDs, upload filters & history)")
-st.caption("Tester-only evaluation (no LL variables). Builds a bundle that thins your pasted pool while preserving the winner on uploaded history.")
+st.caption("Tester-only evaluation (no LL variables). Builds a bundle that thins your pool while preserving the winner on uploaded history.")
 
 with st.sidebar:
     st.subheader("1) Upload master filter CSV")
     filters_file = st.file_uploader("Master filters CSV", type=["csv"])
-    st.caption("Accepted schemas:\n- Wide: id,name,enabled,applicable_if,expression,... (extra columns ignored)\n- Slim: name,description,expression (id derived from name)")
+    st.caption("Accepted schemas:\n- Wide: id,name,enabled,applicable_if,expression,...\n- Slim: name,description,expression (id derived from name)")
 
     st.subheader("2) Upload historical winners")
     hist_file = st.file_uploader("Historical winners (CSV/TXT)", type=["csv","txt"])
     hist_col  = st.text_input("Column name for winners (blank if single column)", "")
 
     st.subheader("3) Current seed")
-    seed_text = st.text_input("Seed (5 digits or input the 13-draw line and we’ll take last 5 digits)", "88001")
+    seed_input = st.text_input("Seed input (either 5 digits or the 13-draw line; we take the last 5 digits)",
+                               "88001,87055,04510,43880,99472,21693,96549,44281,78170,83337,77692,75003,61795")
+    seed_5 = re.sub(r"\D", "", seed_input)[-5:]
 
     st.subheader("4) Scoring & selection knobs")
     bt_n = st.number_input("Backtest sample size", 50, 5000, 500, 50)
@@ -85,49 +156,24 @@ with st.sidebar:
     max_filters = st.number_input("Max filters to pick", 1, 200, 20)
     red_penalty = st.slider("Redundancy penalty weight (Jaccard on eliminated winners)", 0.0, 1.0, 0.3, 0.05)
 
-# Paste areas (center)
 st.subheader("Paste applicable filter IDs (subset you want to consider)")
-ids_text = st.text_area("Paste filter IDs (comma/space/newline separated). Leave blank to consider all enabled filters.", height=100, placeholder="LL002f, LL003b, LL006i, ...")
+ids_text = st.text_area("IDs (comma/space/newline). Leave blank to consider all enabled filters.",
+                        height=100, placeholder="LL002f, LL003b, LL006i, ...")
 
-st.subheader("Paste current pool (one combo per line/column)")
-pool_text = st.text_area("Paste pool here (required). Examples: 01234\n98765\n...", height=200)
+st.subheader("Paste current pool — supports continuous digits")
+pool_text = st.text_area("Examples:\n01234\n98765\n—or—\n0123498765...\n—or—\n01234, 98765, ...",
+                         height=200)
 
 # ----------------------------
-# Loading helpers
+# Loaders for filters/history
 # ----------------------------
-def load_list_like(file, colname: str) -> List[str]:
-    if file is None:
-        return []
-    raw = file.read()
-    try:
-        df = pd.read_csv(io.BytesIO(raw))
-        if colname and colname in df.columns:
-            vals = df[colname].astype(str).tolist()
-        else:
-            vals = df.iloc[:,0].astype(str).tolist()
-    except Exception:
-        vals = io.BytesIO(raw).read().decode("utf-8").strip().splitlines()
-    vals = [v.strip().replace(",", "").replace(" ", "") for v in vals if v.strip()]
-    return vals
-
-def parse_ids(text: str) -> List[str]:
-    if not text.strip():
-        return []
-    parts = [p.strip() for p in text.replace(",", "\n").splitlines() if p.strip()]
-    return parts
-
 def load_filters(file) -> List[FilterRow]:
     if file is None:
         return []
     df = pd.read_csv(file)
     df.columns = [c.strip().lower() for c in df.columns]
 
-    fid_col = None
-    if "id" in df.columns:
-        fid_col = "id"
-    elif "name" in df.columns:
-        fid_col = "name"
-
+    fid_col = "id" if "id" in df.columns else ("name" if "name" in df.columns else None)
     if fid_col is None or "expression" not in df.columns:
         st.error("Master CSV must include 'id' or 'name' and 'expression'.")
         return []
@@ -145,32 +191,25 @@ def load_filters(file) -> List[FilterRow]:
             rows.append(FilterRow(fid=fid, name=name, expr=expr, applicable_if=(app or None), enabled=enabled))
     return rows
 
-# ----------------------------
-# Load everything
-# ----------------------------
 filters_all = load_filters(filters_file)
 history = load_list_like(hist_file, hist_col)
-pool_raw = [ln.strip() for ln in pool_text.splitlines() if ln.strip()]
-pool = [ln.replace(",", "").replace(" ", "") for ln in pool_raw]
+pool = parse_pool_text(pool_text)
 
 cA, cB, cC, cD = st.columns(4)
 cA.metric("Master filters", len(filters_all))
 cB.metric("History rows", len(history))
-cC.metric("Pasted pool", len(pool))
-# derive seed 5 safely
-seed_5 = "".join([c for c in seed_text if c.isdigit()])[-5:] if seed_text else ""
+cC.metric("Parsed pool size", len(pool))
 cD.metric("Seed (last 5)", seed_5 or 0)
 
-if not filters_all or not pool or not seed_5:
-    st.info("Upload master filter CSV, upload history, paste pool, and provide a 5-digit seed to continue.")
+if not filters_all or not pool or not seed_5 or not history:
+    st.info("Upload master filter CSV, upload history, paste pool (continuous supported), and provide a 5-digit seed.")
     st.stop()
 
-# Apply applicable IDs subset if provided + enabled filter
+# Apply applicable IDs subset if provided + enabled flag
 applicable_ids = set(parse_ids(ids_text))
 if applicable_ids:
     filters = [f for f in filters_all if f.fid in applicable_ids]
 else:
-    # if no IDs pasted: consider all rows; if 'enabled' exists and is False, skip
     filters = [f for f in filters_all if (f.enabled is None or f.enabled is True)]
 
 st.success(f"Filters considered: {len(filters)}")
@@ -282,10 +321,7 @@ def build_bundle(df: pd.DataFrame, min_keep_lo: float, max_k: int, alpha: float,
             new_agg_elim = 1 - (1-agg_elim)*(1-r.elim_rate)
             marginal_elim = new_agg_elim - agg_elim
             # redundancy penalty: similarity of eliminated-winners mask
-            if chosen:
-                jac = max(jaccard(r.elim_hist_mask, c.elim_hist_mask) for c in chosen)
-            else:
-                jac = 0.0
+            jac = max((jaccard(r.elim_hist_mask, c.elim_hist_mask) for c in chosen), default=0.0)
             # value = WPP-like + marginal_elim - redundancy
             gain = (r.keep_rate * (r.elim_rate ** alpha)) + marginal_elim - red_penalty * jac
             if gain > best_gain:
@@ -331,12 +367,8 @@ st.download_button("Download chosen filters CSV",
 
 st.divider()
 st.markdown("""
-**How this matches your request**
-- **Upload** master filter CSV & **upload** history ✅  
-- **Paste** applicable **filter IDs** (subset you want to consider) ✅  
-- **Paste** the **current pool** (≈1,700 combos) ✅  
-- Scores each filter with **Keep% (K) + Wilson CI** on history and **Elim% (E)** on your pool ✅  
-- Builds a **bundle** meeting a **Keep lower-CI** target, with **redundancy penalty** and **WPP α** control ✅  
-- Outputs a **copy-ready list of IDs** plus a **CSV** of the chosen subset ✅  
-- Uses **tester-only variables** so your expressions run without LL context ✅
+**Paste formats supported for pool & history**
+- One per line (classic)
+- Comma/space/semicolon separated
+- **Continuous digits:** we auto-chunk into 5s and ignore leftover <5 digits
 """)
