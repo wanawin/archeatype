@@ -1,6 +1,9 @@
 # filter_picker_pro.py
-# Complete Streamlit app – universal tester CSV + history + pool (comma/continuous),
-# with an expanded safe-eval shim so tester/LL/CF-style variables never NameError.
+# Universal tester-CSV filter picker with robust CSV repair:
+# - stitches Unnamed/extra columns containing quoted code
+# - sanitizes expressions (smart quotes, doubled quotes, outer quotes)
+# - safe-eval shim for CF/LL variables to avoid NameErrors
+# - greedy bundle + downloads
 
 import io
 import math
@@ -16,25 +19,26 @@ import streamlit as st
 
 # ------------------------- UI & PAGE ------------------------- #
 st.set_page_config(page_title="Filter Picker (Hybrid I/O)", layout="wide")
-st.title("Filter Picker — Universal CSV + History + Pool")
+st.title("Filter Picker — Universal CSV (tester parity)")
 
 with st.expander("Instructions", expanded=False):
     st.markdown(
         """
         **Inputs**
-        1) **Pool (paste)**: comma-separated or continuous digits; 5-digit combos (e.g., `01234, 56789, ...`).
+        1) **Pool (paste)**: comma-separated or continuous digits; 5-digit combos.
         2) **Master filter CSV**: your tester CSV. Required columns:
            - `id` (or `filter_id`)
-           - `expression` (Python expression; **True** means *eliminate*)
+           - `expression` (Python expression; **True** means eliminate; we also stitch inline fragments)
            - `applicable_if` (optional; empty treated as True)
-           - `name` (optional; used for display)
-        3) **History winners**: CSV or TXT, any order (choose chronology).
+           - `name` (optional; display)
+           - Any extra columns containing quoted logic are **auto-merged** into the final expression.
+        3) **History winners**: CSV or TXT (choose chronology).
         4) (Optional) **Applicable IDs**: comma list to restrict which rows are scored.
 
         **Advanced**
         - Chronology toggle
-        - Greedy bundle with: Min winner survival, Target survivors, Redundancy penalty
-        - All outputs are downloadable **without resetting** the page
+        - Greedy bundle (min winner survival, target survivors, redundancy penalty)
+        - All outputs downloadable **without resetting** the page
         """
     )
 
@@ -72,6 +76,38 @@ with col_hist:
 
 
 # ----------------------- PARSERS/UTILS ---------------------- #
+SMART_Q = {
+    "“": '"', "”": '"', "„": '"', "‟": '"',
+    "‘": "'", "’": "'", "‚": "'", "‛": "'",
+}
+def normalize_quotes(s: str) -> str:
+    if not isinstance(s, str):  # keep safe
+        s = str(s)
+    # map smart quotes to ascii
+    for k, v in SMART_Q.items():
+        s = s.replace(k, v)
+    return s
+
+def strip_outer_quotes(s: str) -> str:
+    s = s.strip()
+    # remove doubled quotes first: ""foo"" -> "foo"
+    s = re.sub(r'""+', '"', s)
+    # If the *entire* thing is enclosed in quotes, peel them off
+    if (len(s) >= 2) and ((s[0] == s[-1] == '"') or (s[0] == s[-1] == "'")):
+        s = s[1:-1].strip()
+    return s
+
+def sanitize_expr(raw: str) -> str:
+    s = normalize_quotes(raw or "")
+    s = s.strip()
+    # collapse repeated double-quotes (CSV artifacts)
+    s = re.sub(r'""+', '"', s)
+    # common artifact: extra commas-only cells appended -> trim trailing commas/spaces
+    s = re.sub(r'[,\s]+$', '', s)
+    # if it's a single quoted blob, peel outer quotes
+    s = strip_outer_quotes(s)
+    return s
+
 def parse_pool(text: str) -> List[str]:
     if not text:
         return []
@@ -94,26 +130,6 @@ def parse_pool(text: str) -> List[str]:
             out.append(c)
     return out
 
-
-def load_filters_csv(file: io.BytesIO) -> pd.DataFrame:
-    df = pd.read_csv(file)
-    cols = {c.lower(): c for c in df.columns}
-    id_col = cols.get("id") or cols.get("filter_id")
-    expr_col = cols.get("expression")
-    name_col = cols.get("name")
-    appl_col = cols.get("applicable_if")
-    if id_col is None or expr_col is None:
-        raise ValueError("CSV must have columns: id (or filter_id) and expression")
-    out = pd.DataFrame({
-        "id": df[id_col].astype(str).str.strip(),
-        "name": (df[name_col].astype(str).str.strip() if name_col else df[id_col].astype(str)),
-        "applicable_if": (df[appl_col].fillna("True").astype(str) if appl_col else "True"),
-        "expression": df[expr_col].astype(str),
-    })
-    out.loc[out["applicable_if"].str.strip().eq(""), "applicable_if"] = "True"
-    return out
-
-
 def load_history(file: io.BytesIO, chronology_label: str) -> List[str]:
     raw = file.read()
     try:
@@ -133,12 +149,75 @@ def load_history(file: io.BytesIO, chronology_label: str) -> List[str]:
         seq = list(reversed(seq))
     return seq
 
-
 def paste_applicable_ids(ids_text: str) -> Optional[set]:
     if not ids_text.strip():
         return None
     ids = [x.strip() for x in re.split(r"[,\s]+", ids_text.strip()) if x.strip()]
     return set([x.upper() for x in ids])
+
+
+# ------------- CSV READER with INLINE STITCHING -------------- #
+CORE_ID_KEYS = {"id", "filter_id"}
+CORE_EXPR_KEYS = {"expression"}
+CORE_NAME_KEYS = {"name"}
+CORE_APPL_KEYS = {"applicable_if"}
+
+def load_filters_csv(file: io.BytesIO) -> pd.DataFrame:
+    df = pd.read_csv(file, dtype=str).fillna("")
+    # Standardize column names (lower)
+    low2real = {c.lower(): c for c in df.columns}
+    id_col = next((low2real[k] for k in CORE_ID_KEYS if k in low2real), None)
+    expr_col = next((low2real[k] for k in CORE_EXPR_KEYS if k in low2real), None)
+    name_col = next((low2real[k] for k in CORE_NAME_KEYS if k in low2real), None)
+    appl_col = next((low2real[k] for k in CORE_APPL_KEYS if k in low2real), None)
+    if id_col is None or expr_col is None:
+        raise ValueError("CSV must have columns: id (or filter_id) and expression")
+
+    # Identify candidate inline-logic columns
+    core_cols = {id_col, expr_col}
+    if name_col: core_cols.add(name_col)
+    if appl_col: core_cols.add(appl_col)
+
+    extra_cols = [c for c in df.columns if c not in core_cols]
+
+    records = []
+    for _, r in df.iterrows():
+        fid = sanitize_expr(r[id_col])
+        nm  = sanitize_expr(r[name_col]) if name_col else fid
+        guard_raw = r[appl_col] if appl_col else "True"
+        guard = sanitize_expr(guard_raw or "True")
+        base_expr = sanitize_expr(r[expr_col] or "")
+
+        # harvest inline fragments from extra columns
+        frags = []
+        for c in extra_cols:
+            val = sanitize_expr(r[c])
+            if not val:
+                continue
+            # Heuristic: looks like code if it contains operators or names we know
+            if re.search(r"[<>=+\-*/%()]|combo_|seed_|set\(|len\(|and|or|not", val):
+                frags.append(val)
+
+        # Stitch base + fragments
+        if base_expr == "" or base_expr.lower() == "true":
+            expr = " and ".join([f"({f})" for f in frags]) if frags else "True"
+        else:
+            expr = base_expr
+            if frags:
+                expr = f"({expr}) and " + " and ".join([f"({f})" for f in frags])
+
+        # final sanitize pass
+        expr = sanitize_expr(expr)
+        guard = sanitize_expr(guard or "True")
+        if guard == "":
+            guard = "True"
+
+        records.append({"id": fid, "name": nm, "applicable_if": guard, "expression": expr})
+
+    out = pd.DataFrame.from_records(records)
+    # Deduplicate by id (keep last row)
+    out = out.drop_duplicates(subset=["id"], keep="last").reset_index(drop=True)
+    return out
 
 
 # ---------------------- SAFE-EVAL SHIM ---------------------- #
@@ -147,7 +226,7 @@ MIRROR_MAP = {'0':'5','1':'6','2':'7','3':'8','4':'9','5':'0','6':'1','7':'2','8
 SAFE_BUILTINS = {
     "int": int, "len": len, "any": any, "all": all, "sum": sum, "set": set,
     "ord": ord, "list": list, "tuple": tuple, "min": min, "max": max, "abs": abs,
-    "Counter": Counter
+    "Counter": Counter, "range": range
 }
 
 def make_env(seed: str, prev1: str, prev2: str, combo: str) -> Dict[str, object]:
@@ -157,18 +236,16 @@ def make_env(seed: str, prev1: str, prev2: str, combo: str) -> Dict[str, object]
     prev2_digits = list(prev2) if prev2 else []
     combo_digits = list(combo)
 
-    # Basic sets & sums
     last2_union = set(prev1_digits) | set(prev2_digits)
     last2_intersection = set(prev1_digits) & set(prev2_digits)
     new_seed_digits = set(seed_digits) - set(prev1_digits)
     seed_sum = sum(map(int, seed_digits)) if seed_digits else 0
     combo_sum = sum(map(int, combo_digits)) if combo_digits else 0
 
-    # ---- Extra names (SAFE DEFAULTS) to avoid NameErrors ----
-    # CF/LL style placeholders — let guards/exprs evaluate instead of skipping.
+    # CF/LL placeholders so guards never NameError
     core_letters = set()
     prev_core_letters = set()
-    digit_current_letters = {str(d): '?' for d in range(10)}  # mapping d->letter
+    digit_current_letters = {str(d): '?' for d in range(10)}
     new_core_digits = set()
     cooled_digits = set()
     ring_digits = set()
@@ -213,18 +290,16 @@ def make_env(seed: str, prev1: str, prev2: str, combo: str) -> Dict[str, object]
     )
     return env
 
-
 def eval_guard(expr: str, env: Dict[str, object]) -> bool:
-    # Any error in guard => treat as not applicable (False), **not** a skip.
     try:
+        expr = sanitize_expr(expr)
         return bool(eval(expr, {"__builtins__": {}}, env))
     except Exception:
         return False
 
-
 def eval_elim(expr: str, env: Dict[str, object]) -> Optional[bool]:
-    # Return None only if expression truly cannot be evaluated.
     try:
+        expr = sanitize_expr(expr)
         return bool(eval(expr, {"__builtins__": {}}, env))
     except Exception:
         return None
@@ -268,7 +343,6 @@ def per_filter_metrics(filters_df: pd.DataFrame,
 
     sub = sub.drop_duplicates(subset=["id"], keep="last").reset_index(drop=True)
 
-    # Use latest context for quick checks
     prev1 = pairs[-1].prev1 if pairs else ""
     prev2 = pairs[-1].prev2 if pairs else ""
     sample_combo = pool[0] if pool else seed_now
@@ -276,19 +350,16 @@ def per_filter_metrics(filters_df: pd.DataFrame,
     for _, row in sub.iterrows():
         fid = str(row["id"]).strip()
         name = str(row["name"]).strip()
-        guard = str(row["applicable_if"]).strip()
+        guard = str(row["applicable_if"]).strip() or "True"
         expr = str(row["expression"]).strip()
 
-        if not expr or expr.lower() == "nan":
+        if not expr:
             skipped.append({"id": fid, "name": name, "reason": "empty expression", "expr": expr})
             continue
 
-        # Check the expression is syntactically valid in current context;
-        # guard errors are treated as False (not skip).
+        # Quick viability check
         sample_env = make_env(seed_now, prev1, prev2, sample_combo)
-        # If the expression itself cannot evaluate *in any simple context*, skip.
-        try_expr = eval_elim(expr, sample_env)
-        if try_expr is None:
+        if eval_elim(expr, sample_env) is None:
             skipped.append({"id": fid, "name": name, "reason": "runtime: expression did not evaluate", "expr": expr})
             continue
 
@@ -300,7 +371,6 @@ def per_filter_metrics(filters_df: pd.DataFrame,
                 continue
             res = eval_elim(expr, env)
             if res is None:
-                # expression fails => skip this row entirely
                 elim_cnt = None
                 break
             if res:
@@ -320,7 +390,7 @@ def per_filter_metrics(filters_df: pd.DataFrame,
             if res is None:
                 continue
             n += 1
-            if not res:
+            if not res:  # not eliminated -> winner survives
                 k += 1
         keep = (k / n) if n > 0 else 0.0
         lb, ub = wilson_ci(k, n) if n > 0 else (0.0, 0.0)
@@ -341,18 +411,6 @@ def per_filter_metrics(filters_df: pd.DataFrame,
 
 
 # ------------------ GREEDY BUNDLE BUILDER ------------------- #
-def eval_guard(expr: str, env: Dict[str, object]) -> bool:  # re-define just to be sure
-    try:
-        return bool(eval(expr, {"__builtins__": {}}, env))
-    except Exception:
-        return False
-
-def eval_elim(expr: str, env: Dict[str, object]) -> Optional[bool]:
-    try:
-        return bool(eval(expr, {"__builtins__": {}}, env))
-    except Exception:
-        return None
-
 def apply_filter_to_pool(expr: str, guard: str, seed: str, prev1: str, prev2: str, pool: Iterable[str]) -> List[str]:
     survivors = []
     for c in pool:
@@ -364,19 +422,6 @@ def apply_filter_to_pool(expr: str, guard: str, seed: str, prev1: str, prev2: st
         if not res:
             survivors.append(c)
     return survivors
-
-@dataclass
-class Pair:
-    prev2: str
-    prev1: str
-    seed: str
-    next: str
-
-def build_history_pairs(history: List[str]) -> List[Pair]:
-    pairs = []
-    for i in range(2, len(history)-1):
-        pairs.append(Pair(prev2=history[i-2], prev1=history[i-1], seed=history[i], next=history[i+1]))
-    return pairs
 
 def bundle_winner_survival(selected: List[Dict], pairs: List[Pair]) -> float:
     k = n = 0
