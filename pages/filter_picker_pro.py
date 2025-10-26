@@ -1,6 +1,7 @@
-# filter_picker_pro.py
-# Full self-contained Streamlit app (adds "Applicable IDs" paste box)
-# Evaluates tester-style filters safely and builds a greedy bundle.
+# filter_picker_universal.py
+# Full, self-contained Streamlit app that ingests your "universal" CSV as-is.
+# It auto-detects logic across columns (incl. Unnamed), normalizes expressions,
+# supports both int and string digit semantics, and builds a greedy bundle.
 
 import io
 import math
@@ -11,225 +12,330 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="Filter Picker — Tester Parity", layout="wide")
+st.set_page_config(page_title="Filter Picker — Universal CSV", layout="wide")
+
 
 # -----------------------------
-# Expression cleaning & parsing
+# Helpers: expression harvesting & normalization
 # -----------------------------
-def normalize_expr(s: str) -> str:
-    """Normalize CSV expression text into valid Python like the Tester app expects."""
+
+BOOL_HINTS = (
+    "combo_digits", "combo_sum", "seed_digits", "prev_seed",
+    "any(", "all(", "len(", " in ", "==", "!=", "<", ">", "<=", ">=", "%", " and ", " or ", " not "
+)
+
+def looks_like_bool_code(s: str) -> bool:
+    s = s.strip()
+    if not s or s.lower() in ("n/a", "na", "none"):
+        return False
+    if s.lower() == "true":
+        return True
+    # If it has operators or known names, treat as boolean-ish
+    return any(h in s for h in BOOL_HINTS)
+
+def normalize_quotes_and_wrapping(s: str) -> str:
+    """Unify curly quotes, collapse doubled quotes, strip one layer of outer quotes."""
     if s is None:
         return ""
     s = str(s)
-    # unify curly quotes/dashes & nbsp
     s = (s.replace("“", '"')
            .replace("”", '"')
            .replace("’", "'")
            .replace("—", "-")
            .replace("\u00A0", " ")
            .strip())
-    # collapse doubled quotes repeatedly (handles ""foo"" and """"bar"""")
     prev = None
+    # Iteratively collapse "" → " and strip outer quotes once per pass
     while prev != s:
         prev = s
-        s = s.replace('""', '"')
-        # remove ONE layer of outer quotes if present
-        if len(s) >= 2 and s[0] == s[-1] and s[0] in ("'", '"'):
-            s = s[1:-1]
-        s = s.strip()
-    return s
+        s = s.replace('""', '"').replace("''", "'").strip()
+        if len(s) >= 2 and s[0] == s[-1] and s[0] in ('"', "'"):
+            s = s[1:-1].strip()
+    return s.strip()
 
-def parse_pool_text(txt: str) -> List[str]:
+def auto_quote_digits_in_sets_and_lists(expr: str, prefer_strings: bool) -> str:
     """
-    Accepts continuous digits or comma/space/line separated. Returns unique 5-digit combos.
+    Convert {1,2,9} → {'1','2','9'} (and [1,2] → ['1','2']) when expressions
+    likely operate on string digits. If prefer_strings=False, leave them as ints.
     """
-    if not txt:
-        return []
-    tokens = re.findall(r"\d+", txt)
-    combos = []
-    for t in tokens:
-        if len(t) == 5:
-            combos.append(t)
-        elif len(t) > 5:
-            # chop into 5s without overlap
-            for i in range(0, len(t) - 4, 5):
-                combos.append(t[i:i+5])
-    if not combos:
-        for chunk in re.split(r"[,\s]+", txt):
-            chunk = chunk.strip()
-            if chunk.isdigit():
-                chunk = chunk.zfill(5)
-                if len(chunk) == 5:
-                    combos.append(chunk)
-    # de-dupe preserving order
-    seen, out = set(), []
-    for c in combos:
-        if c not in seen:
-            seen.add(c); out.append(c)
-    return out
+    if not expr or not prefer_strings:
+        return expr
 
-def load_filters_csv(file: io.BytesIO) -> pd.DataFrame:
-    """Load tester-style filter CSV; drop Unnamed columns; normalize expressions."""
+    def conv_items(text, opener, closer):
+        parts = [p.strip() for p in text.split(",")]
+        out = []
+        for p in parts:
+            if re.fullmatch(r"[\"'][0-9][\"']", p):  # already '7' or "7"
+                out.append(p)
+            elif re.fullmatch(r"[0-9]", p):
+                out.append(f"'{p}'")
+            else:
+                out.append(p)
+        return opener + ",".join(out) + closer
+
+    # Sets
+    expr = re.sub(r"\{([^{}]+)\}", lambda m: conv_items(m.group(1), "{", "}"), expr)
+    # Lists
+    expr = re.sub(r"\[([^\[\]]+)\]", lambda m: conv_items(m.group(1), "[", "]"), expr)
+    return expr
+
+def harvest_logic_from_row(row: pd.Series) -> Tuple[str, str]:
+    """
+    Return (applicable_if, expression) harvested from any relevant columns in the row.
+    Priority:
+      - explicit 'applicable_if' and 'expression'
+      - any columns whose names contain those strings
+      - any 'Unnamed:*' columns that look like boolean code
+    """
+    cols = {c.lower().strip(): c for c in row.index}
+
+    # Canonicals if present
+    app_if = ""
+    expr   = ""
+
+    # 1) direct matches
+    if "applicable_if" in cols:
+        app_if = str(row[cols["applicable_if"]])
+    if "expression" in cols:
+        expr = str(row[cols["expression"]])
+
+    # 2) near matches by name
+    if not app_if:
+        for c in row.index:
+            if "applicable" in c.lower():
+                app_if = str(row[c])
+                break
+    if not expr:
+        # prefer a column literally named 'expression' or with 'expr'
+        for c in row.index:
+            lc = c.lower()
+            if "expression" in lc or "expr" in lc:
+                val = str(row[c])
+                if val and val.strip() and looks_like_bool_code(val):
+                    expr = val
+                    break
+
+    # 3) scan Unnamed for leftover logic
+    # We assign leftover boolean-looking strings as expression if expr is empty,
+    # otherwise append them to applicable_if as extra gating, whichever makes more sense.
+    if not app_if or not expr:
+        leftovers = []
+        for c in row.index:
+            if c.lower().startswith("unnamed"):
+                val = str(row[c]).strip()
+                if val and looks_like_bool_code(val):
+                    leftovers.append(val)
+        if leftovers:
+            extra = " and ".join(f"({normalize_quotes_and_wrapping(v)})" for v in leftovers)
+            if not expr:
+                expr = extra
+            else:
+                # if expr already present, treat leftovers as gating
+                app_if = f"({app_if}) and ({extra})" if app_if else extra
+
+    # final tidy
+    app_if = normalize_quotes_and_wrapping(app_if)
+    expr   = normalize_quotes_and_wrapping(expr)
+    return app_if, expr
+
+
+# -----------------------------
+# CSV loader (universal)
+# -----------------------------
+def load_universal_csv(file: io.BytesIO) -> pd.DataFrame:
     df = pd.read_csv(file, dtype=str, keep_default_na=False)
-    df = df.loc[:, ~df.columns.str.startswith("Unnamed")]
-    # pick columns robustly
+    # We keep all columns (do not drop Unnamed) because logic may hide there.
+
+    # Derive id/name
     cols = {c.lower().strip(): c for c in df.columns}
-    if "expression" not in cols:
-        guess = [c for c in df.columns if "expr" in c.lower()]
-        if guess:
-            df["expression"] = df[guess[0]]
-        else:
-            st.error("CSV is missing an 'expression' column."); df["expression"] = ""
-    else:
-        df["expression"] = df[cols["expression"]]
-    # id / name
     if "id" in cols:
         df["id"] = df[cols["id"]].astype(str).str.strip()
+    elif "name" in cols:
+        df["id"] = df[cols["name"]].astype(str).str.strip()
     else:
-        if "name" in cols:
-            df["id"] = df[cols["name"]].astype(str).str.strip()
-        else:
-            df["id"] = [f"F{i+1:04d}" for i in range(len(df))]
+        df["id"] = [f"F{i+1:04d}" for i in range(len(df))]
+
     if "name" in cols:
         df["name"] = df[cols["name"]].astype(str).str.strip()
     else:
         df["name"] = df["id"]
-    # normalize expression text
-    df["expression"] = df["expression"].map(normalize_expr)
-    return df[["id","name","expression"]]
 
-def parse_applicable_ids(txt: str) -> List[str]:
-    if not txt or not txt.strip():
-        return []
-    parts = re.split(r"[,\s]+", txt.strip())
-    return [p.strip() for p in parts if p.strip()]
+    # Harvest logic per row
+    app_ifs, exprs = [], []
+    for _, r in df.iterrows():
+        ai, ex = harvest_logic_from_row(r)
+        app_ifs.append(ai)
+        exprs.append(ex)
+
+    df["applicable_if_raw"] = app_ifs
+    df["expression_raw"]    = exprs
+
+    # Compose final expression: (app_if) and (expr) if both exist
+    finals, reasons, prefer_strings_flags = [], [], []
+    for ai, ex in zip(app_ifs, exprs):
+        ai = ai.strip()
+        ex = ex.strip()
+        # Decide if we should auto-quote digit sets/lists (prefer strings)
+        # Heuristic: if expression mentions combo_digits or uses quotes around digits anywhere, prefer strings
+        prefer_strings = ("combo_digits" in ex) or ("'" in ai+ex) or ('"' in ai+ex)
+        prefer_strings_flags.append(prefer_strings)
+
+        # Normalize digits where needed (string-digit context)
+        ai_n = auto_quote_digits_in_sets_and_lists(ai, prefer_strings)
+        ex_n = auto_quote_digits_in_sets_and_lists(ex, prefer_strings)
+
+        if ex_n and ai_n:
+            finals.append(f"(({ai_n})) and (({ex_n}))")
+            reasons.append("")
+        elif ex_n:
+            finals.append(ex_n)
+            reasons.append("")
+        elif ai_n:
+            # An applicable_if with no expression: treat as the actual rule (rare)
+            finals.append(ai_n)
+            reasons.append("")
+        else:
+            finals.append("")
+            reasons.append("no_logic_found")
+
+    out = pd.DataFrame({
+        "id": df["id"],
+        "name": df["name"],
+        "applicable_if": df["applicable_if_raw"],
+        "expression": df["expression_raw"],
+        "final_expr": finals,
+        "why_empty": reasons,
+        "prefer_strings": prefer_strings_flags
+    })
+    # Drop rows with truly no logic
+    out = out[out["final_expr"].str.strip() != ""].reset_index(drop=True)
+    return out
+
 
 # -----------------------------
-# Safe evaluation environment
+# Evaluation environment (universal)
 # -----------------------------
 SAFE_FUNCS = {
     "set": set, "sum": sum, "len": len, "any": any, "all": all,
     "max": max, "min": min, "sorted": sorted,
 }
-def build_env(seed_str: str, combo_str: str) -> Dict:
-    """
-    Match the Tester’s env:
-      - seed_digits as a set of INTs (e.g., {8,0,1})
-      - combo_digits as list of STRs (['8','8','0','0','1'])
-      - combo_sum as INT
-    """
-    combo_digits = list(combo_str)
-    combo_sum = sum(int(d) for d in combo_digits)
-    seed_digits = set(map(int, seed_str)) if seed_str else set()
+
+def build_env(seed: str, combo: str) -> Dict:
+    combo_digits = list(combo)                    # ['8','8','0','0','1']
+    combo_digits_int = [int(d) for d in combo]    # [8,8,0,0,1]
+    combo_sum = sum(combo_digits_int)
+    seed_digits = set(int(d) for d in seed) if seed else set()
+    seed_digits_str = set(seed) if seed else set()
+
     env = {
-        "combo_digits": combo_digits,
+        # both flavors for maximum compatibility
+        "combo_digits": combo_digits,               # strings
+        "combo_digits_int": combo_digits_int,       # ints
         "combo_sum": combo_sum,
-        "seed_digits": seed_digits,
+        "seed_digits": seed_digits,                 # ints (tester style)
+        "seed_digits_str": seed_digits_str,         # strings (LL/text style)
     }
     env.update(SAFE_FUNCS)
     return env
 
 def eval_rule(expr: str, env: Dict) -> bool:
-    """
-    Evaluate the CSV expression. Return True if the rule fires (eliminate).
-    Empty => False; 'True' => always-on eliminated.
-    """
-    if not expr:
-        return False
     s = expr.strip()
+    if not s:
+        return False
     if s.lower() == "true":
         return True
-    try:
-        return bool(eval(s, {"__builtins__": {}}, env))
-    except Exception:
-        # mark as skipped by raising outward
-        raise
+    # Safety: no builtins; this matches your tester’s style
+    return bool(eval(s, {"__builtins__": {}}, env))
+
 
 # -----------------------------
-# Metrics & scoring
+# Metrics, scoring & greedy bundle
 # -----------------------------
 def wilson_ci(p_hat: float, n: int, z: float = 1.96) -> Tuple[float, float]:
-    if n == 0:
+    if n <= 0:
         return (0.0, 1.0)
     denom = 1 + z**2/n
     center = (p_hat + z**2/(2*n)) / denom
     margin = z * math.sqrt((p_hat*(1 - p_hat) + z**2/(4*n))/n) / denom
     return max(0.0, center - margin), min(1.0, center + margin)
 
-def compute_filter_metrics(
-    df_filters: pd.DataFrame,
+def compute_metrics(
+    df: pd.DataFrame,
     pool: List[str],
     seed: str,
-    history_rows: List[str],
-    weight_mode: str = "time_decay",
+    winners: List[str],
     alpha_wpp: float = 1.5
-) -> Tuple[pd.DataFrame, Dict[str, set]]:
+) -> Tuple[pd.DataFrame, Dict[str,set], pd.DataFrame]:
     """
-    For each filter: compute keep% on winners and elim% on pool (hard apply).
-    Returns metrics DF + map {filter_id -> set(eliminated_pool_indices)}.
+    Evaluate each final_expr on pool and history, producing:
+      - metrics dataframe
+      - elim_sets: {id -> set(pool indices eliminated)}
+      - skipped dataframe with reasons
     """
     n_pool = len(pool)
     pool_envs = [build_env(seed, c) for c in pool]
-    # history envs & weights
-    hist_envs = [build_env(seed, w) for w in history_rows]
-    Nw = len(history_rows)
-    if Nw > 1 and weight_mode == "time_decay":
-        weights = np.linspace(1.0, 0.5, num=Nw)
-    else:
-        weights = np.ones(Nw, dtype=float)
+    hist_envs = [build_env(seed, w) for w in winners]
 
-    rows = []; elim_sets: Dict[str,set] = {}
-    for _, r in df_filters.iterrows():
-        fid, fname, expr = r["id"], r["name"], r["expression"]
-        eliminated_idx = set()
-        # apply to pool
+    rows, skipped_rows = [], []
+    elim_sets: Dict[str,set] = {}
+
+    for _, r in df.iterrows():
+        fid, name, expr = str(r["id"]), str(r["name"]), str(r["final_expr"])
+
+        # Evaluate on pool
+        eliminated = set()
         compile_failed = False
-        for i, env in enumerate(pool_envs):
-            try:
-                if eval_rule(expr, env):
-                    eliminated_idx.add(i)
-            except Exception:
-                compile_failed = True
-                break
+        try:
+            # quick sanity parse (let Python raise on syntax if broken)
+            _ = compile(expr, "<expr>", "eval")
+        except Exception as e:
+            skipped_rows.append({"id": fid, "name": name, "reason": f"syntax: {e}", "expr": expr})
+            compile_failed = True
+
+        if not compile_failed:
+            for i, env in enumerate(pool_envs):
+                try:
+                    if eval_rule(expr, env):
+                        eliminated.add(i)
+                except Exception as e:
+                    skipped_rows.append({"id": fid, "name": name, "reason": f"runtime: {e}", "expr": expr})
+                    compile_failed = True
+                    break
+
         if compile_failed:
-            keep_pct = np.nan; elim_pct = np.nan; WPP = np.nan
             elim_sets[fid] = set()
             rows.append({
-                "id": fid, "name": fname, "keep%": keep_pct,
-                "keep%_lb": np.nan, "keep%_ub": np.nan,
-                "elim%": elim_pct, "WPP": WPP, "expression": expr
+                "id": fid, "name": name, "keep%": np.nan, "keep%_lb": np.nan, "keep%_ub": np.nan,
+                "elim%": np.nan, "WPP": np.nan, "final_expr": expr
             })
             continue
 
-        elim_sets[fid] = eliminated_idx
-        elim_pct = len(eliminated_idx)/max(1, n_pool)
+        elim_sets[fid] = eliminated
+        elim_pct = len(eliminated) / max(1, n_pool)
 
-        # keep% on history
-        if Nw == 0:
-            keep_pct = np.nan
-            lb = ub = np.nan
-        else:
-            kept_mass = 0.0
-            for env, w in zip(hist_envs, weights):
-                try:
-                    fired = eval_rule(expr, env)
-                except Exception:
-                    fired = False  # treat as kept
-                if not fired:
-                    kept_mass += w
-            keep_pct = kept_mass / weights.sum()
-            lb, ub = wilson_ci(keep_pct, Nw)
+        # Keep% on winners
+        keeps = 0
+        for env in hist_envs:
+            try:
+                fires = eval_rule(expr, env)
+            except Exception:
+                fires = False  # treat failure as "kept"
+            keeps += (0 if fires else 1)
+        n_w = len(hist_envs)
+        keep_pct = (keeps / n_w) if n_w > 0 else float("nan")
+        lb, ub = (wilson_ci(keep_pct, n_w) if n_w > 0 else (float("nan"), float("nan")))
 
-        WPP = (0.0 if np.isnan(keep_pct) else keep_pct) * (elim_pct ** float(alpha_wpp))
+        WPP = (0.0 if (keep_pct != keep_pct) else keep_pct) * (elim_pct ** float(alpha_wpp))
         rows.append({
-            "id": fid, "name": fname, "keep%": keep_pct,
-            "keep%_lb": lb if not np.isnan(keep_pct) else np.nan,
-            "keep%_ub": ub if not np.isnan(keep_pct) else np.nan,
-            "elim%": elim_pct, "WPP": WPP, "expression": expr
+            "id": fid, "name": name,
+            "keep%": keep_pct, "keep%_lb": lb, "keep%_ub": ub,
+            "elim%": elim_pct, "WPP": WPP,
+            "final_expr": expr
         })
 
-    out = pd.DataFrame(rows).sort_values(["WPP","keep%","elim%"], ascending=[False,False,False])
-    return out.reset_index(drop=True), elim_sets
+    metrics = pd.DataFrame(rows).sort_values(["WPP","keep%","elim%"], ascending=[False,False,False]).reset_index(drop=True)
+    skipped = pd.DataFrame(skipped_rows)
+    return metrics, elim_sets, skipped
 
 def jaccard(a: set, b: set) -> float:
     if not a and not b:
@@ -238,18 +344,13 @@ def jaccard(a: set, b: set) -> float:
 
 def greedy_bundle(
     metrics: pd.DataFrame,
-    elim_sets: Dict[str, set],
+    elim_sets: Dict[str,set],
     n_pool: int,
     min_survival: float,
     target_survivors: int,
     redundancy_penalty: float
-) -> Tuple[List[str], float, int, List[Tuple[str, float, int]]]:
-    """
-    Greedy bundle builder: respects min_survival; stops at target_survivors or exhaustion.
-    """
-    chosen: List[str] = []
-    union_elims: set = set()
-    steps: List[Tuple[str, float, int]] = []
+) -> Tuple[List[str], float, int, List[Tuple[str,float,int]]]:
+    chosen, union, steps = [], set(), []
     survivors = n_pool
     win_survival = 1.0
 
@@ -262,25 +363,23 @@ def greedy_bundle(
         best = None; best_score = -1e18
         for _, r in m.iterrows():
             fid = r["id"]
-            if fid in chosen: continue
+            if fid in chosen: 
+                continue
             S = elim_sets.get(fid, set())
-            new_union = union_elims | S
+            new_union = union | S
             new_survivors = max(0, n_pool - len(new_union))
             cand_keep = float(r["keep%"])
             cand_survival = win_survival * cand_keep
             if cand_survival < min_survival:
                 continue
-            # redundancy
-            red = 0.0 if not union_elims else jaccard(S, union_elims)
-            score = ( (survivors - new_survivors)         # more eliminated is better
-                      + 1000.0 * float(r["WPP"])          # reward win-preserving thinning
-                      - 200.0  * redundancy_penalty * red )
+            red = 0.0 if not union else jaccard(S, union)
+            score = ((survivors - new_survivors) + 1000.0*float(r["WPP"]) - 200.0*redundancy_penalty*red)
             if score > best_score:
                 best_score = score
                 best = (fid, new_union, new_survivors, cand_survival)
         if not best:
             break
-        fid, union_elims, survivors, win_survival = best
+        fid, union, survivors, win_survival = best
         chosen.append(fid)
         steps.append((fid, win_survival, survivors))
         if survivors <= target_survivors:
@@ -288,162 +387,157 @@ def greedy_bundle(
 
     return chosen, win_survival, survivors, steps
 
+
 # -----------------------------
 # UI
 # -----------------------------
-st.title("Filter Picker — Tester Parity (with Applicable IDs)")
+st.title("Filter Picker — Universal CSV")
 
-with st.expander("Paste current pool — supports continuous digits", expanded=True):
-    pool_text = st.text_area(
-        "Pool (continuous digits or comma/space/newline-separated)",
-        height=140,
-        placeholder="01234 98765 12345, 54321 … or continuous 0123498765…"
-    )
-pool = parse_pool_text(pool_text)
-st.caption(f"Parsed pool size: **{len(pool)}**")
-
-c_top1, c_top2, c_top3 = st.columns(3)
-with c_top1:
-    seed = st.text_input("Seed (last 5 digits)", value="", max_chars=5).strip()
-    seed = re.sub(r"\D", "", seed).zfill(5)[:5]
-with c_top2:
-    alpha_wpp = st.number_input("WPP α (thinning weight)", 0.1, 3.0, 1.5, 0.1)
-with c_top3:
-    chronology = st.radio("History chronology", ["Newest→Oldest", "Oldest→Newest"], horizontal=True, index=0)
-
-up1, up2 = st.columns(2)
-with up1:
-    mf = st.file_uploader("Upload master filter CSV (tester-style)", type=["csv"])
-with up2:
-    hist_file = st.file_uploader("Upload history winners (csv/txt)", type=["csv","txt"])
-
-# Applicable IDs paste box
-st.markdown("### Applicable filter IDs (optional)")
-app_ids_text = st.text_area(
-    "Paste IDs to limit evaluation (comma / space / newline). Leave blank to use ALL from CSV.",
-    height=110,
-    placeholder="LL002f LL003b, LL018_unique_eq5, …"
-)
-app_ids = parse_applicable_ids(app_ids_text)
-
-# Load history
-history_rows: List[str] = []
-if hist_file:
-    raw = hist_file.read().decode("utf-8", errors="ignore")
-    tokens = re.findall(r"\d+", raw)
+with st.expander("Paste current pool — continuous or comma/space/newline-separated", expanded=True):
+    pool_text = st.text_area("Pool", height=140, placeholder="01234, 98765, ... or a long digit blob 0123498765...")
+    # Parse pool
+    tokens = re.findall(r"\d+", pool_text or "")
+    pool: List[str] = []
     for t in tokens:
         if len(t) == 5:
-            history_rows.append(t)
+            pool.append(t)
         elif len(t) > 5:
             for i in range(0, len(t) - 4, 5):
-                history_rows.append(t[i:i+5])
+                pool.append(t[i:i+5])
+    # de-dupe preserving order
+    seen = set(); pool_clean = []
+    for c in pool:
+        if c not in seen:
+            seen.add(c); pool_clean.append(c)
+    pool = pool_clean
+st.caption(f"Parsed pool size: **{len(pool)}**")
+
+c1, c2, c3 = st.columns(3)
+with c1:
+    seed = st.text_input("Seed (last 5)", value="", max_chars=5)
+    seed = re.sub(r"\D", "", seed).zfill(5)[:5]
+with c2:
+    alpha = st.number_input("WPP α (elim exponent)", 0.1, 3.0, 1.5, 0.1)
+with c3:
+    chronology = st.radio("History chronology", ["Newest→Oldest", "Oldest→Newest"], index=0, horizontal=True)
+
+u1, u2 = st.columns(2)
+with u1:
+    filters_file = st.file_uploader("Upload universal CSV (same one used by your other apps)", type=["csv"])
+with u2:
+    history_file = st.file_uploader("Upload winners history (csv/txt)", type=["csv","txt"])
+
+st.markdown("### Applicable filter IDs (optional)")
+ids_text = st.text_area("Paste IDs (comma/space/newline); leave blank to use ALL", height=110)
+app_ids = [t.strip() for t in re.split(r"[,\s]+", ids_text.strip()) if t.strip()] if ids_text.strip() else []
+
+run = st.button("🚀 Compute metrics", type="primary", use_container_width=True)
+
+# Load history
+winners: List[str] = []
+if history_file:
+    raw = history_file.read().decode("utf-8", errors="ignore")
+    toks = re.findall(r"\d+", raw)
+    for t in toks:
+        if len(t) == 5:
+            winners.append(t)
+        elif len(t) > 5:
+            for i in range(0, len(t) - 4, 5):
+                winners.append(t[i:i+5])
     if chronology == "Newest→Oldest":
         pass
     else:
-        history_rows = list(reversed(history_rows))
-st.caption(f"History rows loaded: **{len(history_rows)}**")
+        winners = list(reversed(winners))
 
-# Load filters CSV
-filters_df: Optional[pd.DataFrame] = None
-if mf:
-    try:
-        filters_df = load_filters_csv(io.BytesIO(mf.getvalue()))
-        st.success(f"Loaded filters: {len(filters_df)} total rows")
-    except Exception as e:
-        st.error(f"Failed to load filters CSV: {e}")
-
-# RUN
-run = st.button("🚀 Compute metrics", type="primary", use_container_width=True)
+st.caption(f"History rows: **{len(winners)}**")
 
 if run:
     if not pool:
         st.warning("Please paste the current pool."); st.stop()
     if not seed or len(seed) != 5:
         st.warning("Please enter a 5-digit seed."); st.stop()
-    if filters_df is None or filters_df.empty:
-        st.warning("Please upload the master filter CSV."); st.stop()
-    if not history_rows:
-        st.warning("Please upload winners history (csv/txt)."); st.stop()
+    if not winners:
+        st.warning("Please upload a winners history file."); st.stop()
+    if filters_file is None:
+        st.warning("Please upload the universal CSV."); st.stop()
 
-    # Subset by Applicable IDs if provided
-    use_df = filters_df.copy()
+    # Load & harvest logic
+    with st.spinner("Parsing universal CSV and harvesting expressions…"):
+        try:
+            harvested = load_universal_csv(io.BytesIO(filters_file.getvalue()))
+        except Exception as e:
+            st.error(f"Failed to parse CSV: {e}")
+            st.stop()
+
+    st.success(f"Found {len(harvested)} rows with executable logic.")
+
+    # Apply Applicable IDs subset
+    use_df = harvested
     matched = None
     if app_ids:
-        # match case-insensitively on 'id'
         idset = {x.lower() for x in app_ids}
-        use_df = use_df[use_df["id"].str.lower().isin(idset)].reset_index(drop=True)
+        use_df = harvested[harvested["id"].str.lower().isin(idset)].reset_index(drop=True)
         matched = len(use_df)
         if use_df.empty:
-            st.error("None of the pasted IDs matched the CSV 'id' column."); st.stop()
+            st.error("None of the pasted IDs matched the CSV.")
+            st.stop()
 
-    with st.spinner("Evaluating filters (safe)…"):
-        metrics_df, elim_sets = compute_filter_metrics(
-            use_df, pool, seed, history_rows,
-            weight_mode="time_decay",
-            alpha_wpp=alpha_wpp
-        )
+    # Evaluate
+    with st.spinner("Evaluating rules against pool and history…"):
+        metrics, elim_sets, skipped = compute_metrics(use_df, pool, seed, winners, alpha_wpp=alpha)
 
-    compiled = metrics_df["keep%"].notna().sum()
-    skipped = len(metrics_df) - compiled
-    msg = f"Compiled **{compiled}**; skipped **{skipped}**."
+    compiled = metrics["keep%"].notna().sum()
+    skipped_n = 0 if skipped is None else len(skipped)
+    msg = f"Compiled **{compiled}**; Skipped **{skipped_n}**."
     if matched is not None:
         msg += f" Matched Applicable IDs: **{matched}** / {len(app_ids)}."
     st.success(msg)
 
-    # Show skipped list for quick debugging
-    if skipped:
-        with st.expander("Skipped filters (could not evaluate)"):
-            st.dataframe(
-                metrics_df[metrics_df["keep%"].isna()][["id","name","expression"]],
-                use_container_width=True
-            )
+    if skipped_n:
+        with st.expander("Skipped rows (reason + expression)"):
+            st.dataframe(skipped[["id","name","reason","expr"]], use_container_width=True, hide_index=True)
 
     st.subheader("Per-filter metrics")
-    show_cols = ["id","name","keep%","keep%_lb","keep%_ub","elim%","WPP","expression"]
-    st.dataframe(metrics_df[show_cols].sort_values("WPP", ascending=False), use_container_width=True)
+    show = metrics.copy()
+    show["keep%"] = (show["keep%"]*100).round(2)
+    show["elim%"] = (show["elim%"]*100).round(2)
+    show["WPP"] = show["WPP"].astype(float).round(6)
+    st.dataframe(show[["id","name","keep%","keep%_lb","keep%_ub","elim%","WPP","final_expr"]],
+                 use_container_width=True, hide_index=True)
 
     # ---------------- Greedy bundle ----------------
     st.markdown("---")
     st.subheader("Build greedy bundle")
     b1, b2, b3 = st.columns(3)
     with b1:
-        min_survival = st.slider("Min winner survival", 0.50, 0.99, 0.72, 0.01)
+        min_survival = st.slider("Min winner survival", 0.50, 0.99, 0.75, 0.01)
     with b2:
-        target_survivors = st.number_input("Target survivors", min_value=1, value=50, step=1)
+        target_survivors = st.number_input("Target survivors", 1, len(pool), 50, 1)
     with b3:
-        red_pen = st.slider("Redundancy penalty", 0.0, 1.0, 0.20, 0.05)
+        red_pen = st.slider("Redundancy penalty", 0.0, 1.0, 0.30, 0.05)
 
-    if st.button("Build", type="primary"):
+    if st.button("Build bundle", type="primary"):
         chosen, surv_prob, survivors, steps = greedy_bundle(
-            metrics_df, elim_sets, len(pool),
-            min_survival=float(min_survival),
-            target_survivors=int(target_survivors),
-            redundancy_penalty=float(red_pen)
+            metrics, elim_sets, len(pool),
+            float(min_survival), int(target_survivors), float(red_pen)
         )
-        st.markdown("**Selected bundle (IDs):**")
-        st.write(", ".join(chosen) if chosen else "—")
+        st.write("**Selected IDs:**", ", ".join(chosen) if chosen else "—")
         st.write(f"Projected winner survival: **{surv_prob:.2%}**")
         st.write(f"Projected survivors: **{survivors:,}**")
 
         if steps:
-            step_df = pd.DataFrame(steps, columns=["added","survival","survivors"])
-            st.dataframe(step_df, use_container_width=True)
+            st.dataframe(pd.DataFrame(steps, columns=["added","survival","survivors"]),
+                         use_container_width=True, hide_index=True)
 
-        # Survivors preview & download
+        # Survivors for download
         union = set()
         for fid in chosen:
             union |= elim_sets.get(fid, set())
         survivors_idx = [i for i in range(len(pool)) if i not in union]
         survivors_list = [pool[i] for i in survivors_idx]
-        st.text_area("Survivors (preview, up to 2,000 chars)",
-                     value=", ".join(survivors_list)[:2000],
-                     height=120)
-        st.download_button(
-            "Download survivors (.txt)",
-            ("\n".join(survivors_list)).encode("utf-8"),
-            file_name=f"survivors_{survivors}.txt",
-            use_container_width=True
-        )
-
+        st.text_area("Survivors (preview)", value=", ".join(survivors_list)[:2000], height=110)
+        st.download_button("Download survivors (.txt)",
+                           ("\n".join(survivors_list)).encode("utf-8"),
+                           file_name=f"survivors_{survivors}.txt", use_container_width=True)
 else:
-    st.info("Paste the pool, upload master CSV + history, enter seed, optionally paste Applicable IDs, then click **Compute metrics**.")
+    st.info("Paste pool, upload universal CSV + history, enter seed, optionally paste Applicable IDs, then click **Compute metrics**.")
