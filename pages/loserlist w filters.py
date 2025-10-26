@@ -1,4 +1,3 @@
-# pages/loserlist w filters.py
 import io
 import re
 from typing import Dict, List, Set, Tuple
@@ -100,8 +99,9 @@ def _replace_sets(expr: str,
                   cooled_digits: Set[str],
                   new_core_digits: Set[str],
                   loser_7_9: List[str],
-                  ring_digits: List[str]) -> str:
-    def fmt(xs): 
+                  ring_digits: List[str],
+                  hot7_last10: List[str]) -> str:
+    def fmt(xs):
         return "[" + ",".join("'" + d + "'" for d in sorted(xs)) + "]"
 
     out = expr
@@ -111,6 +111,8 @@ def _replace_sets(expr: str,
     out = re.sub(r"\bin\s+new_core_digits\b", " in " + fmt(new_core_digits), out)
     out = re.sub(r"\bin\s+loser_7_9\b",       " in " + fmt(loser_7_9), out)
     out = re.sub(r"\bin\s+ring_digits\b",     " in " + fmt(ring_digits), out)
+    # NEW: hot7_last10 → literal list of digits
+    out = re.sub(r"\bin\s+hot7_last10\b",     " in " + fmt(hot7_last10), out)
 
     # Translate: digit_current_letters[d] in ['A','B',...]  ->  d in ['x','y',...]
     pat = re.compile(
@@ -139,7 +141,8 @@ def digits_only_df(in_csv_text: str,
                    prev_core_letters: Set[str],
                    cooled_digits: Set[str],
                    new_core_digits: Set[str],
-                   loser_7_9: List[str]) -> pd.DataFrame:
+                   loser_7_9: List[str],
+                   hot7_last10: List[str]) -> pd.DataFrame:
     df_in  = _to_three_cols(_read_csv_loose(in_csv_text))
     byL    = _digits_by_letter(digit_current_letters)
     ring   = _ring_digits(prev_core_letters, digit_current_letters)
@@ -151,7 +154,8 @@ def digits_only_df(in_csv_text: str,
 
         expr = _replace_sets(
             expr, byL, prev_core_letters,
-            cooled_digits, new_core_digits, loser_7_9, ring
+            cooled_digits, new_core_digits, loser_7_9, ring,
+            hot7_last10
         )
         rows.append({"name": name, "description": desc, "expression": expr})
 
@@ -273,10 +277,15 @@ def render_verification_panels(info: Dict):
     cooled_digits   = [d for d in DIGITS if info["rank_curr_map"][d] > info["rank_prev_map"][d]]
     loser_7_9       = info["ranking"][7:10]
 
+    # NEW: derive Hot-7 from the current 10 draws (most→least hot order)
+    order_curr_str = info.get("current_map_order", "0123456789")
+    hot7_last10    = list(order_curr_str[:7])
+
     st.session_state["core_digits"]     = core_digits
     st.session_state["new_core_digits"] = new_core_digits
     st.session_state["cooled_digits"]   = cooled_digits
     st.session_state["loser_7_9"]       = loser_7_9
+    st.session_state["hot7_last10"]     = hot7_last10
 
     st.subheader("Loser list (Least → Most Likely)")
     st.code(" ".join(info["ranking"]))
@@ -316,6 +325,8 @@ def render_verification_panels(info: Dict):
         ring = _ring_digits(set(info["core_letters"]), info["digit_current_letters"])
         st.markdown("**ring_digits (digits)**")
         st.code(", ".join(ring) or "∅")
+        st.markdown("**hot7_last10 (digits)**")
+        st.code(", ".join(hot7_last10) or "∅")
 
 if compute:
     try:
@@ -343,7 +354,7 @@ if "info" in st.session_state:
 
     if build:
         info = st.session_state["info"]
-        df3 = digits_only_df(
+        tester_ready = digits_only_df(
             in_csv_text=st.session_state.get("mega_csv", ""),
             digit_current_letters=info["digit_current_letters"],
             digit_prev_letters=info["digit_prev_letters"],
@@ -351,8 +362,9 @@ if "info" in st.session_state:
             cooled_digits=set(st.session_state["cooled_digits"]),
             new_core_digits=set(st.session_state["new_core_digits"]),
             loser_7_9=list(st.session_state["loser_7_9"]),
+            hot7_last10=list(st.session_state.get("hot7_last10", [])),
         )
-        tester_df = to_tester_schema(df3)
+        tester_df = to_tester_schema(tester_ready)
 
         st.markdown("### Tester-ready CSV (copy/paste)")
         csv_bytes = tester_df.to_csv(index=False).encode("utf-8")
