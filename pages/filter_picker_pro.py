@@ -1,9 +1,11 @@
-# ---- Compile report panel (skipped filters) ----
-def render_compile_report(skipped_df):
-    import io
-    import pandas as pd
-    import streamlit as st
+# ---- at very top (after imports) ----
+import streamlit as st
+import pandas as pd
 
+st.set_page_config(page_title="Filter Picker Pro", layout="wide")
+
+def render_compile_report(skipped_df: pd.DataFrame | None):
+    import io
     if skipped_df is None or getattr(skipped_df, "empty", True):
         st.info("No skipped rows. All expressions compiled.")
         return
@@ -12,7 +14,6 @@ def render_compile_report(skipped_df):
         st.caption(f"{len(skipped_df)} row(s) could not be evaluated.")
         st.dataframe(skipped_df, use_container_width=True, height=420)
 
-        # Download as CSV (UTF-8)
         csv_buf = io.StringIO()
         skipped_df.to_csv(csv_buf, index=False)
         st.download_button(
@@ -23,8 +24,7 @@ def render_compile_report(skipped_df):
             key="dl_skipped_filters_csv",
         )
 
-        # Also offer a plain-text list of IDs (handy for debugging)
-        id_list = ", ".join(map(str, skipped_df["id"].tolist()))
+        id_list = ", ".join(map(str, skipped_df.get("id", [])))
         st.text_area("Skipped IDs (comma-separated)", id_list, height=90)
         st.download_button(
             label="Copy/download skipped IDs (.txt)",
