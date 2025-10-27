@@ -1,13 +1,13 @@
 # file: filter_picker_pro.py
-import io, csv, ast, math, re, unicodedata
-from collections import Counter
+import io, csv, ast, math, re, textwrap
+from collections import Counter, defaultdict
 from typing import List, Dict, Any, Tuple
-import pandas as pd
+import numpy as np
 import streamlit as st
+import pandas as pd
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Safe built-ins + shims
-
+# 0) Safe built-ins + utility shims  (mirrors tester page)  ─────────────────────
 ALLOWED_BUILTINS = {
     "len": len, "sum": sum, "any": any, "all": all,
     "set": set, "range": range, "sorted": sorted,
@@ -18,43 +18,28 @@ ALLOWED_BUILTINS = {
     "Counter": Counter, "math": math,
 }
 
-def ord_safe(x):
+# ord shim (some CSVs call ord() on non-chars; keep from crashing)
+def ord(x):
     try:
-        if isinstance(x, str) and len(x) == 1:
-            return __builtins__.ord(x)
-        if isinstance(x, int):
-            return __builtins__.ord(str(x))
-        s = str(x)
-        return __builtins__.ord(s[0]) if s else 0
+        return __builtins__.ord(x)
     except Exception:
         return 0
 
-def ord(x):  # noqa: A001
-    return ord_safe(x)
-
+# legacy 08/09 literal sanitizer, used if an expression fails to eval because of 08, 09, etc.
 _leading_zero_int = re.compile(r'(?<![\w])0+(\d+)(?!\s*\.)')
-
-def _sanitize_numeric_literals(code: str) -> str:
-    return _leading_zero_int.sub(r"\1", code)
-
-def _normalize_unicode(code: str) -> str:
-    if not isinstance(code, str):
-        return code
-    s = unicodedata.normalize("NFKC", code)
-    s = s.replace("≤", "<=").replace("≥", ">=").replace("≠", "!=")
-    s = s.replace("–", "-").replace("—", "-")
-    s = s.replace("“", '"').replace("”", '"').replace("’", "'")
-    return s
-
-def _preprocess_expr(raw: str) -> str:
-    return _sanitize_numeric_literals(_normalize_unicode(raw))
+def _sanitize_numeric_literals(code_or_obj):
+    if isinstance(code_or_obj, str):
+        return _leading_zero_int.sub(r"\1", code_or_obj)
+    return code_or_obj
 
 def _eval(code_or_obj, ctx):
-    src = _preprocess_expr(code_or_obj) if isinstance(code_or_obj, str) else code_or_obj
-    g = {"__builtins__": ALLOWED_BUILTINS, "ord": ord_safe}
-    return eval(src, g, ctx)
+    g = {"__builtins__": ALLOWED_BUILTINS}
+    try:
+        return eval(code_or_obj, g, ctx)
+    except SyntaxError:
+        return eval(_sanitize_numeric_literals(code_or_obj), g, ctx)
 
-# Helpers used by some rows
+# Sum category + structure helpers (used by CSV)
 def sum_category(total: int) -> str:
     if 0 <= total <= 14:  return 'Very Low'
     if 15 <= total <= 20: return 'Low'
@@ -72,89 +57,29 @@ def structure_of(digits: List[int]) -> str:
     if c == [5]:         return 'QUINT'
     return f'OTHER-{c}'
 
-# VTRAC & MIRROR maps
+# V-TRAC & mirror maps + aliases used in CSV expressions
 V_TRAC_GROUPS = {0:1,5:1,1:2,6:2,2:3,7:3,3:4,8:4,4:5,9:5}
-MIRROR_PAIRS  = {0:5,5:0,1:6,6:1,2:7,7:2,3:8,8:3,4:9,9:4}
-def mirror_of(x):
-    try:
-        if isinstance(x, str): x = int(x)
-        return MIRROR_PAIRS[int(x)]
-    except Exception:
-        return None
-
-# Aliases some CSVs use
+MIRROR_PAIRS = {0:5,5:0,1:6,6:1,2:7,7:2,3:8,8:3,4:9,9:4}
 MIRROR = MIRROR_PAIRS
-mirror = MIRROR
-mirrir = MIRROR
+mirror = MIRROR  # many rows call mirror.get(d, -1)
 V_TRAC = V_TRAC_GROUPS
 VTRAC_GROUPS = V_TRAC_GROUPS
 vtrac = V_TRAC_GROUPS
-
-PRIMES = {2,3,5,7}
-EVENS  = {0,2,4,6,8}
-ODDS   = {1,3,5,7,9}
-
-# More utility predicates often seen implicitly
-def is_prime(d):  # accept str/int
-    try: d = int(d)
-    except: return False
-    return d in PRIMES
-
-def is_even(d):
-    try: d = int(d)
-    except: return False
-    return d % 2 == 0
-
-def is_odd(d):
-    try: d = int(d)
-    except: return False
-    return d % 2 == 1
-
-def as_int_list(xs):
-    out = []
-    for x in xs:
-        try: out.append(int(x))
-        except: pass
-    return out
-
-def as_str_list(xs):
-    return [str(x) for x in xs]
-
-def count_adjacent_step(digs, step):
-    try: return sum(1 for i in range(len(digs)-1) if (int(digs[i+1]) - int(digs[i])) == step)
-    except: return 0
-
-def has_run_len(digs, step, length):
-    c = 0
-    for i in range(len(digs)-1):
-        if (int(digs[i+1]) - int(digs[i])) == step:
-            c += 1
-            if c >= length: return True
-        else:
-            c = 0
-    return False
-
-def is_palindrome_str(s): return s == s[::-1]
-def nonstrict_increasing(digs):
-    diffs = [int(digs[i+1]) - int(digs[i]) for i in range(len(digs)-1)]
-    return all(d >= 0 for d in diffs) and any(d > 0 for d in diffs)
-def strict_monotone(digs, step):
-    return all((int(digs[i+1]) - int(digs[i]) == step) for i in range(len(digs)-1))
+mirrir = MIRROR  # common historical typo
 
 # ───────────────────────────────────────────────────────────────────────────────
-# UI
-
-st.set_page_config(page_title="Filter Picker — Universal (max-compat)", layout="wide")
-st.title("Filter Picker — Universal CSV (max compatibility)")
+# 1) UI  ────────────────────────────────────────────────────────────────────────
+st.set_page_config(page_title="Filter Picker — Universal CSV", layout="wide")
+st.title("Filter Picker (Hybrid I/O) — Universal CSV")
 
 with st.expander("Paste current pool — supports continuous digits", expanded=True):
     pool_text = st.text_area(
         "Pool (comma-separated or one per line). Duplicates ignored.",
-        height=200,
+        height=220,
         placeholder="e.g. 01234, 98765, ...  or  01234\n98765\n..."
     )
 
-c1, c2, c3 = st.columns([1.2,1,1])
+c1, c2, c3 = st.columns([1.1,1,1])
 with c1:
     filt_file = st.file_uploader("Upload master filter CSV", type=["csv"])
 with c2:
@@ -164,8 +89,6 @@ with c3:
 
 ids_text = st.text_input("Optional: paste applicable filter IDs (comma/space separated). Leave blank to consider all compiled rows.")
 
-st.divider()
-
 cA, cB, cC = st.columns([1,1,1])
 with cA:
     min_keep = st.slider("Min winner survival (bundle)", 0.50, 0.99, 0.75, 0.01)
@@ -174,11 +97,10 @@ with cB:
 with cC:
     redundancy_pen = st.slider("Redundancy penalty (diversity)", 0.0, 1.0, 0.2, 0.05)
 
-st.button("Compute / Rebuild", type="primary", use_container_width=True)
+run_btn = st.button("Compute / Rebuild", type="primary", use_container_width=True)
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Pool
-
+# 2) Parse pool  ────────────────────────────────────────────────────────────────
 def _norm_pool(text: str) -> List[str]:
     if not text: return []
     raw = text.replace("\r"," ").replace("\n", ",")
@@ -193,269 +115,161 @@ def _norm_pool(text: str) -> List[str]:
 pool = _norm_pool(pool_text)
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Load CSV
-
+# 3) Load universal filter CSV (same as tester)  ────────────────────────────────
 def _enabled_value(val: str) -> bool:
     s = (val or "").strip().lower()
     return s in {'"""true"""','"true"','true','1','yes','y'}
 
-def load_filters_csv(file) -> List[Dict[str,Any]]:
-    if not file: return []
+def load_filters_csv(file) -> Tuple[List[Dict[str,Any]], List[Tuple[str,str,str,str]]]:
+    """
+    Returns (rows, syntactic_skips).
+    Each row: {id,name,enabled,app_code,expr_code,raw_app,raw_expr}
+    Syntactic skips: (id,name,reason,text_that_failed)
+    """
+    if not file: return [], []
     data = file.read().decode("utf-8", errors="ignore")
     file.seek(0)
     reader = csv.DictReader(io.StringIO(data))
-    out = []
+    out, bad = [], []
     for raw in reader:
         row = { (k or "").strip().lower(): (v or "").strip() for k,v in raw.items() }
         fid = (row.get('id') or row.get('fid') or "").strip()
         name = (row.get('name') or "").strip()
-        applicable = _preprocess_expr((row.get('applicable_if') or "True").strip().strip("'").strip('"'))
-        expr = _preprocess_expr((row.get('expression') or "False").strip().strip("'").strip('"'))
+        applicable = (row.get('applicable_if') or "True").strip().strip("'").strip('"')
+        expr = (row.get('expression') or "False").strip().strip("'").strip('"')
         enabled = _enabled_value(row.get('enabled',''))
 
+        # Only **syntax** check and store compiled objects. Do **not** execute here.
         try:
             ast.parse(f"({applicable})", mode='eval'); app_code = compile(applicable, '<app>', 'eval')
-        except SyntaxError:
-            app_code = applicable
+        except Exception as e:
+            bad.append((fid, name, f"applicable_if parse: {e.__class__.__name__}: {e}", applicable))
+            continue
+
         try:
             ast.parse(f"({expr})", mode='eval'); expr_code = compile(expr, '<expr>', 'eval')
-        except SyntaxError:
-            expr_code = expr
+        except Exception as e:
+            bad.append((fid, name, f"expression parse: {e.__class__.__name__}: {e}", expr))
+            continue
 
         out.append({"id":fid, "name":name, "enabled":enabled,
                     "app_code":app_code, "expr_code":expr_code,
                     "raw_app":applicable, "raw_expr":expr})
-    return out
+    return out, bad
 
-filters_csv = load_filters_csv(filt_file)
+filters_csv, syntactic_skips = load_filters_csv(filt_file)
 
-requested_ids: set[str] = set()
+# If IDs pasted, restrict to those
+applicable_ids = set()
 if ids_text.strip():
-    requested_ids = {t.strip().upper() for t in re.split(r"[,\s]+", ids_text) if t.strip()}
+    applicable_ids = {t.strip().upper() for t in re.split(r"[,\s]+", ids_text) if t.strip()}
 
-all_csv_ids = {r["id"].upper() for r in filters_csv}
-missing_ids = sorted(list(requested_ids - all_csv_ids)) if requested_ids else []
-rows_for_compile = [r for r in filters_csv if (not requested_ids or r["id"].upper() in requested_ids)]
+if applicable_ids:
+    filters_csv = [r for r in filters_csv if r["id"].upper() in applicable_ids]
 
 # ───────────────────────────────────────────────────────────────────────────────
-# History, CF/LL sets derived from history
-
+# 4) Parse history + build winner triples  ──────────────────────────────────────
 def _read_history(file) -> List[str]:
     if not file: return []
     body = file.read().decode("utf-8", errors="ignore")
     file.seek(0)
-    return re.findall(r"\b\d{5}\b", body)
+    # csv or txt: scan all 5-digit tokens
+    digs = re.findall(r"\b\d{5}\b", body)
+    return digs
 
 raw_hist = _read_history(hist_file)
 if raw_hist and chronology == "Latest→Earliest":
     raw_hist = list(reversed(raw_hist))
 
 def _winner_triples(arr: List[str]) -> List[Tuple[str,str,str]]:
-    return [(arr[i-2], arr[i-1], arr[i]) for i in range(2, len(arr))]
+    triples = []
+    for i in range(2, len(arr)):
+        triples.append((arr[i-2], arr[i-1], arr[i]))
+    return triples
 
 triples = _winner_triples(raw_hist)
 
-def build_letter_mapping(hist: List[str]) -> Dict[int, str]:
-    if not hist:
-        return {d: "ABCDEFGHIJ"[d] for d in range(10)}
-    ctr = Counter(int(ch) for w in hist for ch in w)
-    order = sorted(range(10), key=lambda d: (-ctr[d], d))
-    letters = list("ABCDEFGHIJ")
-    return {d: letters[i] for i, d in enumerate(order)}
-
-current_map = build_letter_mapping(raw_hist)
-prev_hist   = raw_hist[:-1] if len(raw_hist) >= 1 else raw_hist
-previous_map = build_letter_mapping(prev_hist)
-
-def letter_rank(letter: str) -> int:
-    return "ABCDEFGHIJ".index(letter) + 1 if letter in "ABCDEFGHIJ" else 10
-
-prev_seed  = triples[-1][1] if triples else ""
-seed_now   = triples[-1][2] if triples else (pool[0] if pool else "00000")
-
-def core_letters_from_seed(seed: str, mapping: Dict[int,str]) -> List[str]:
-    return [mapping[int(ch)] for ch in seed] if seed else []
-
-prev_core_letters = core_letters_from_seed(prev_seed, previous_map)
-core_letters      = core_letters_from_seed(seed_now,  current_map)
-
-digit_current_letters  = {d: current_map[d] for d in range(10)} | {str(d): current_map[d] for d in range(10)}
-digit_previous_letters = {d: previous_map[d] for d in range(10)} | {str(d): previous_map[d] for d in range(10)}
-
-# cooled digits (moved toward J)
-cooled_digits_int = []
-for d in range(10):
-    if letter_rank(current_map[d]) > letter_rank(previous_map[d]):
-        cooled_digits_int.append(d)
-cooled_digits_str = [str(d) for d in cooled_digits_int]
-
-# ring digits: adjacent rank to any current core digit
-seed_digits_int = [int(x) for x in seed_now] if seed_now else []
-core_ranks = {letter_rank(current_map[d]) for d in seed_digits_int}
-ring_digits_int = []
-for d in range(10):
-    r = letter_rank(current_map[d])
-    if any(abs(r - cr) == 1 for cr in core_ranks):
-        ring_digits_int.append(d)
-ring_digits_str = [str(d) for d in ring_digits_int]
-
-# new core = in current seed, not in prev
-prev_seed_digits_int = [int(x) for x in prev_seed] if prev_seed else []
-new_core_digits_int = sorted(set(seed_digits_int) - set(prev_seed_digits_int))
-new_core_digits_str = [str(d) for d in new_core_digits_int]
-
-# loser_7_9 both views
-loser_7_9_int = [7,8,9]
-loser_7_9_str = ["7","8","9"]
-
-# fixed sets frequently referenced
-fixed_core_09124_int = [0,9,1,2,4]
-fixed_core_09124_str = ["0","9","1","2","4"]
-be_digits_int = [1,4]
-be_digits_str = ["1","4"]
-
-# hot/cold (coarse) from full history — optional
-ctr_all = Counter(int(ch) for w in raw_hist for ch in w) if raw_hist else Counter()
-freq_order = [d for d,_ in ctr_all.most_common()] + [d for d in range(10) if d not in ctr_all]
-hot_digits_int  = freq_order[:4] if freq_order else []
-cold_digits_int = freq_order[-4:] if freq_order else []
-hot_digits_str  = as_str_list(hot_digits_int)
-cold_digits_str = as_str_list(cold_digits_int)
-
 # ───────────────────────────────────────────────────────────────────────────────
-# Context generator (INT + STR views, aliases, helpers)
-
-def gen_ctx_for_combo(seed:str, prev:str, prev2:str, combo:str):
-    seed_digits = [int(x) for x in seed] if seed else []
+# 5) Context generator – mirrors tester page names  ─────────────────────────────
+def gen_ctx_for_combo(seed:str, prev:str, prev2:str, combo:str,
+                      hot=None, cold=None, due=None):
+    seed_digits = [int(x) for x in seed]
     prev_digits = [int(x) for x in prev] if prev else []
     prev2_digits = [int(x) for x in prev2] if prev2 else []
     cdigits = [int(x) for x in combo] if combo else []
+    seed_value = int(seed)
+
+    new_seed_digits = set(seed_digits) - set(prev_digits)
+    common_to_both = set(seed_digits) & set(prev_digits)
+    last2 = set(seed_digits) | set(prev_digits)
+    seed_counts = Counter(seed_digits)
+    seed_sum = sum(seed_digits)
+    seed_vtracs = set(V_TRAC_GROUPS[d] for d in seed_digits)
+    combo_sum = sum(cdigits)
+    combo_vtracs = set(V_TRAC_GROUPS[d] for d in cdigits)
 
     ctx = {
-        # basic winners/combos
-        "seed_value": int(seed) if seed else 0,
-        "seed_sum": sum(seed_digits),
-        "seed_sum_last_digit": (sum(seed_digits) % 10) if seed_digits else 0,
+        "seed_value": seed_value,
+        "seed_sum": seed_sum,
+        "seed_sum_last_digit": seed_sum % 10,
         "prev_seed_sum": sum(prev_digits) if prev_digits else None,
         "prev_prev_seed_sum": sum(prev2_digits) if prev2_digits else None,
 
         "seed_digits": seed_digits,
-        "seed_digits_s": list(seed) if seed else [],
         "prev_seed_digits": prev_digits,
         "prev_prev_seed_digits": prev2_digits,
 
+        "new_seed_digits": new_seed_digits,
+        "common_to_both": common_to_both,
+        "last2": last2,
+        "seed_counts": seed_counts,
+        "seed_vtracs": seed_vtracs,
+
         "combo_digits": cdigits,
-        "combo_digits_s": list(combo) if combo else [],
-        "combo_sum": sum(cdigits),
+        "combo_sum": combo_sum,
+        "combo_vtracs": combo_vtracs,
         "combo_structure": structure_of(cdigits),
         "winner_structure": structure_of(seed_digits),
 
-        # VTRAC / MIRROR
-        "MIRROR": MIRROR_PAIRS, "mirror": MIRROR_PAIRS, "mirrir": MIRROR_PAIRS,
-        "MIRROR_PAIRS": MIRROR_PAIRS, "mirror_of": mirror_of,
+        "MIRROR": MIRROR, "mirror": MIRROR, "mirrir": MIRROR,
+        "MIRROR_PAIRS": MIRROR_PAIRS,
         "V_TRAC_GROUPS": V_TRAC_GROUPS, "VTRAC_GROUPS": V_TRAC_GROUPS,
         "V_TRAC": V_TRAC_GROUPS, "VTRAC_GROUP": V_TRAC_GROUPS, "vtrac": V_TRAC_GROUPS,
 
-        # helpers
         "sum_category": sum_category, "structure_of": structure_of,
-        "Counter": Counter, "PRIMES": PRIMES, "EVENS": EVENS, "ODDS": ODDS,
-        "is_prime": is_prime, "is_even": is_even, "is_odd": is_odd,
-        "ord": ord_safe,
-        "count_adjacent_step": count_adjacent_step,
-        "has_run_len": has_run_len,
-        "is_palindrome_str": is_palindrome_str,
-        "nonstrict_increasing": nonstrict_increasing,
-        "strict_monotone": strict_monotone,
+        "Counter": Counter,
 
-        # CF letters
-        "digit_current_letters": digit_current_letters,
-        "digit_previous_letters": digit_previous_letters,
-        "core_letters": core_letters,
-        "prev_core_letters": prev_core_letters,
-
-        # LL-style sets (both int and str)
-        "cooled_digits": cooled_digits_int, "cooled_digits_s": cooled_digits_str,
-        "ring_digits": ring_digits_int,     "ring_digits_s": ring_digits_str,
-        "new_core_digits": new_core_digits_int, "new_core_digits_s": new_core_digits_str,
-        "loser_7_9": loser_7_9_int, "loser_7_9_s": loser_7_9_str,
-        "hot_digits": hot_digits_int, "hot_digits_s": hot_digits_str,
-        "cold_digits": cold_digits_int, "cold_digits_s": cold_digits_str,
-
-        # common fixed sets as both types
-        "fixed_core_09124": fixed_core_09124_int,
-        "fixed_core_09124_s": fixed_core_09124_str,
-        "BE_digits": be_digits_int, "BE_digits_s": be_digits_str,
+        # **Defaults** so filters that reference these never crash
+        "hot_digits": list(hot) if hot is not None else [],
+        "cold_digits": list(cold) if cold is not None else [],
+        "due_digits": list(due) if due is not None else [],
     }
     return ctx
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Compile rows + reports
+# 6) Report true compile status (syntax only) + give copy/download of skips  ────
+st.subheader("ID Status (requested list)")
+req = len(applicable_ids) if applicable_ids else len(filters_csv)
+st.caption(f"Compiled (syntax OK): {len(filters_csv)} | Skipped (syntax errors): {len(syntactic_skips)}.")
 
-def _compiles(rows):
-    compiled, skipped = [], []
-    dummy = gen_ctx_for_combo(seed_now, prev_seed, "", seed_now)
-    for r in rows:
-        try:
-            _eval(r["raw_app"], dummy)
-            _eval(r["raw_expr"], dummy)
-            compiled.append(r)
-        except Exception as e:
-            skipped.append((r["id"], r["name"], str(e), r.get("raw_app",""), r["raw_expr"]))
-    return compiled, skipped
-
-# winner triples and seeds for dummy
-seed_now  = triples[-1][2] if triples else (pool[0] if pool else "00000")
-prev_seed = triples[-1][1] if triples else ""
-
-compiled_rows, skipped_rows = _compiles(rows_for_compile)
-
-if requested_ids:
-    compiled_ids = {r["id"].upper() for r in compiled_rows}
-    skipped_ids  = {sid.upper() for sid,_,_,_,_ in skipped_rows}
-    missing_now  = sorted(list(requested_ids - (compiled_ids | skipped_ids)))
-    st.info(f"Requested IDs matched: {len(compiled_ids|skipped_ids)} / {len(requested_ids)}")
-    with st.expander("ID Status (requested list)", expanded=False):
-        status_rows = []
-        for fid in sorted(requested_ids):
-            if fid in compiled_ids:
-                status_rows.append({"id": fid, "status": "compiled", "reason": ""})
-            elif fid in skipped_ids:
-                reason = next((r for (sid,_,r,_,_) in skipped_rows if sid.upper()==fid), "")
-                status_rows.append({"id": fid, "status": "skipped", "reason": reason})
-            else:
-                status_rows.append({"id": fid, "status": "missing", "reason": "Not found in CSV"})
-        st.dataframe(pd.DataFrame(status_rows), use_container_width=True, height=260)
-        miss = [r["id"] for r in status_rows if r["status"]=="missing"]
-        skip = [r["id"] for r in status_rows if r["status"]=="skipped"]
-        st.download_button("Download missing IDs (.txt)", ("\n".join(miss)+"\n").encode("utf-8"),
-                           file_name="missing_ids.txt", mime="text/plain", use_container_width=True)
-        st.download_button("Download skipped IDs (.txt)", ("\n".join(skip)+"\n").encode("utf-8"),
-                           file_name="skipped_ids.txt", mime="text/plain", use_container_width=True)
-
-st.success(f"Compiled {len(compiled_rows)} expressions; Skipped {len(skipped_rows)}.")
-
-with st.expander("Skipped rows (reason + expression)", expanded=True):
-    if skipped_rows:
-        sk_df = pd.DataFrame(skipped_rows, columns=["id","name","reason","applicable_if","expression"])
-        st.dataframe(sk_df, use_container_width=True, height=280)
-        reason_counts = (sk_df["reason"].fillna("").str.extract(r"^([^:]+):?")[0]
-                         .value_counts().reset_index())
-        reason_counts.columns = ["reason_head", "count"]
-        st.caption("Grouped reasons:")
-        st.dataframe(reason_counts, use_container_width=True, height=160)
-        buff = io.StringIO()
-        sk_df.to_csv(buff, index=False)
-        st.download_button("Download skipped report (.csv)", buff.getvalue().encode("utf-8"),
-                           file_name="skipped_filters_report.csv", mime="text/csv",
-                           use_container_width=True)
-        st.text_area("Skipped IDs (comma-separated)",
-                     ", ".join(sk_df["id"].astype(str).tolist()), height=80)
+with st.expander("Skipped rows (reason + expression)", expanded=False):
+    if syntactic_skips:
+        df_skip = pd.DataFrame(syntactic_skips, columns=["id","name","reason","expr"])
+        st.dataframe(df_skip, use_container_width=True, height=360)
+        bad_ids = ", ".join(x[0] for x in syntactic_skips if x[0])
+        st.code(bad_ids, language="text")
+        st.download_button("Download skipped IDs (.txt)", bad_ids.encode("utf-8"),
+                           file_name="skipped_ids.txt")
     else:
-        st.caption("No skipped rows 🎉")
+        st.write("No syntax errors.")
+
+# If nothing to do, stop here
+if not (filters_csv and triples and pool):
+    st.info("Load CSV + history + pool (and optionally paste applicable IDs), then click Compute / Rebuild.")
+    st.stop()
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Metrics
-
+# 7) Runtime evaluation helpers  ────────────────────────────────────────────────
 def wilson_ci(k, n, z=1.96):
     if n==0: return (0.0, 0.0, 0.0)
     p = k/n
@@ -466,80 +280,75 @@ def wilson_ci(k, n, z=1.96):
 
 def filter_fires(row, ctx) -> bool:
     try:
-        if not _eval(row["raw_app"], ctx): return False
-        return bool(_eval(row["raw_expr"], ctx))
+        if not _eval(row["app_code"], ctx):
+            return False
+        return bool(_eval(row["expr_code"], ctx))
     except Exception:
+        # At runtime we still guard; if anything explodes, treat as NOT firing.
         return False
 
-def _winner_triples(arr: List[str]) -> List[Tuple[str,str,str]]:
-    return [(arr[i-2], arr[i-1], arr[i]) for i in range(2, len(arr))]
-
-triples = _winner_triples(raw_hist)
-
+# ───────────────────────────────────────────────────────────────────────────────
+# 8) Per-filter metrics  ────────────────────────────────────────────────────────
 metrics = []
-if compiled_rows and triples and pool:
-    for r in compiled_rows:
-        keep = 0; n = 0
-        for prev2, prev1, seed in triples:
-            ctx = gen_ctx_for_combo(seed, prev1, prev2, seed)
-            fired = filter_fires(r, ctx)
-            keep += (not fired); n += 1
-        p, lb, ub = wilson_ci(keep, n)
+latest_seed = triples[-1][2]
+prev1 = triples[-1][1]
+prev2 = triples[-1][0]
 
-        elim = 0
-        latest_seed_for_pool = seed_now
-        prev1_for_pool = prev_seed
-        prev2_for_pool = triples[-1][0] if triples else ""
-        for c in pool:
-            ctx = gen_ctx_for_combo(latest_seed_for_pool, prev1_for_pool, prev2_for_pool, c)
-            if filter_fires(r, ctx): elim += 1
-        elim_rate = elim / max(1, len(pool))
+# history (keep%), pool (elim%), WPP
+for r in filters_csv:
+    keep = 0; n = 0
+    for pp, p1, seed in triples:
+        ctx = gen_ctx_for_combo(seed, p1, pp, seed)
+        fired = filter_fires(r, ctx)
+        keep += (not fired)
+        n += 1
+    p, lb, ub = wilson_ci(keep, n)
 
-        alpha = 1.0
-        wpp = p * (elim_rate ** alpha)
+    elim = 0
+    for c in pool:
+        ctx = gen_ctx_for_combo(latest_seed, prev1, prev2, c)
+        if filter_fires(r, ctx): elim += 1
+    elim_rate = elim / max(1, len(pool))
 
-        metrics.append({
-            "id": r["id"], "name": r["name"],
-            "keep%": p, "keep_lb": lb, "keep_ub": ub,
-            "elim%": elim_rate, "wpp": wpp, "row": r
-        })
+    alpha = 1.0
+    wpp = p * (elim_rate ** alpha)
 
+    metrics.append({
+        "id": r["id"], "name": r["name"],
+        "keep%": p, "keep_lb": lb, "keep_ub": ub,
+        "elim%": elim_rate, "wpp": wpp, "row": r
+    })
+
+# Table
 st.subheader("Per-filter metrics")
-if metrics:
-    df = pd.DataFrame(metrics).sort_values(["wpp","keep_lb","elim%"], ascending=[False,False,False])
-    fmt = df.copy()
-    for col in ["keep%","keep_lb","keep_ub","elim%","wpp"]:
-        fmt[col] = (fmt[col]*100).round(2)
-    st.dataframe(fmt[["id","name","keep%","keep_lb","keep_ub","elim%","wpp"]],
-                 use_container_width=True, height=420)
-else:
-    st.info("Load CSV + history + pool, then click Compute / Rebuild.")
-    st.stop()
+df = pd.DataFrame(metrics).sort_values(["wpp","keep_lb","elim%"], ascending=[False,False,False])
+fmt = df.copy()
+for col in ["keep%","keep_lb","keep_ub","elim%","wpp"]:
+    fmt[col] = (fmt[col]*100).round(2)
+st.dataframe(fmt[["id","name","keep%","keep_lb","keep_ub","elim%","wpp"]], use_container_width=True, height=420)
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Greedy bundle
-
+# 9) Greedy bundle  ─────────────────────────────────────────────────────────────
 def apply_filters_bundle(rows: List[Dict[str,Any]], pool: List[str],
                          latest_seed: str, prev1: str, prev2: str) -> Tuple[int, List[str]]:
     survivors = []
     for c in pool:
         ctx = gen_ctx_for_combo(latest_seed, prev1, prev2, c)
-        fired = any(filter_fires(r, ctx) for r in rows)
+        fired = False
+        for r in rows:
+            if filter_fires(r, ctx):
+                fired = True; break
         if not fired: survivors.append(c)
     return len(survivors), survivors
 
-def bundle_keep_est(selected):
+def bundle_keep_est(selected) -> float:
     if not selected: return 1.0
     prod_elim = 1.0
     for m in selected:
         prod_elim *= (1.0 - m["keep%"])
     return 1.0 - prod_elim
 
-latest_seed = seed_now
-prev1 = prev_seed
-prev2 = triples[-1][0] if triples else ""
-
-# precompute pool firing sets
+# Precompute pool firing sets to penalize redundancy
 pool_fires: Dict[str,set] = {}
 for m in metrics:
     fired = set()
@@ -553,32 +362,36 @@ current_survivors = len(pool)
 candidates = sorted(metrics, key=lambda x: (x["wpp"], x["keep_lb"]), reverse=True)
 
 while candidates:
-    best_delta = 0; best = None
+    best_delta = 0
+    best = None
     for m in candidates:
         trial = selected + [m]
         est_keep = bundle_keep_est(trial)
         if est_keep < min_keep:
             continue
+
         if selected:
-            overlap = max(
-                (len(pool_fires[m["id"]] & pool_fires[s["id"]]) /
-                 max(1,len(pool_fires[m["id"]] | pool_fires[s["id"]]))) for s in selected
-            )
+            overlap = max((len(pool_fires[m["id"]] & pool_fires[s["id"]]) /
+                           max(1,len(pool_fires[m["id"]] | pool_fires[s["id"]]))) for s in selected)
         else:
             overlap = 0.0
         pen = 1.0 - redundancy_pen*overlap
-        union_fired = set().union(*[pool_fires[s["id"]] for s in trial])
+
+        union_fired = set().union(*[pool_fires[s["id"]] for s in trial]) if trial else set()
         est_survivors = len(pool) - len(union_fired)
         delta = (current_survivors - est_survivors) * pen
         if delta > best_delta:
             best_delta, best = delta, m
+
     if not best:
         break
+
     selected.append(best)
     selected_rows.append(best["row"])
     current_survivors = len(pool) - len(set().union(*[pool_fires[s["id"]] for s in selected]))
     if current_survivors <= target_survivors:
         break
+
     candidates = [c for c in candidates if c["id"] != best["id"]]
 
 final_n, final_survivors = apply_filters_bundle(selected_rows, pool, latest_seed, prev1, prev2)
