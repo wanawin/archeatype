@@ -2,12 +2,11 @@
 import io, csv, ast, math, re, unicodedata
 from collections import Counter
 from typing import List, Dict, Any, Tuple
-import numpy as np
 import pandas as pd
 import streamlit as st
 
 # ───────────────────────────────────────────────────────────────────────────────
-# 0) Safe built-ins + utility shims
+# Safe built-ins + shims
 
 ALLOWED_BUILTINS = {
     "len": len, "sum": sum, "any": any, "all": all,
@@ -51,13 +50,11 @@ def _preprocess_expr(raw: str) -> str:
     return _sanitize_numeric_literals(_normalize_unicode(raw))
 
 def _eval(code_or_obj, ctx):
-    if isinstance(code_or_obj, str):
-        src = _preprocess_expr(code_or_obj)
-    else:
-        src = code_or_obj
+    src = _preprocess_expr(code_or_obj) if isinstance(code_or_obj, str) else code_or_obj
     g = {"__builtins__": ALLOWED_BUILTINS, "ord": ord_safe}
     return eval(src, g, ctx)
 
+# Helpers used by some rows
 def sum_category(total: int) -> str:
     if 0 <= total <= 14:  return 'Very Low'
     if 15 <= total <= 20: return 'Low'
@@ -75,10 +72,9 @@ def structure_of(digits: List[int]) -> str:
     if c == [5]:         return 'QUINT'
     return f'OTHER-{c}'
 
-# V-TRAC & MIRROR maps
+# VTRAC & MIRROR maps
 V_TRAC_GROUPS = {0:1,5:1,1:2,6:2,2:3,7:3,3:4,8:4,4:5,9:5}
 MIRROR_PAIRS  = {0:5,5:0,1:6,6:1,2:7,7:2,3:8,8:3,4:9,9:4}
-
 def mirror_of(x):
     try:
         if isinstance(x, str): x = int(x)
@@ -86,7 +82,7 @@ def mirror_of(x):
     except Exception:
         return None
 
-# aliases seen in CSVs
+# Aliases some CSVs use
 MIRROR = MIRROR_PAIRS
 mirror = MIRROR
 mirrir = MIRROR
@@ -98,11 +94,58 @@ PRIMES = {2,3,5,7}
 EVENS  = {0,2,4,6,8}
 ODDS   = {1,3,5,7,9}
 
-# ───────────────────────────────────────────────────────────────────────────────
-# 1) UI
+# More utility predicates often seen implicitly
+def is_prime(d):  # accept str/int
+    try: d = int(d)
+    except: return False
+    return d in PRIMES
 
-st.set_page_config(page_title="Filter Picker — Universal (CF + LL sets)", layout="wide")
-st.title("Filter Picker (Hybrid I/O) — Universal CSV + CF/LL variables")
+def is_even(d):
+    try: d = int(d)
+    except: return False
+    return d % 2 == 0
+
+def is_odd(d):
+    try: d = int(d)
+    except: return False
+    return d % 2 == 1
+
+def as_int_list(xs):
+    out = []
+    for x in xs:
+        try: out.append(int(x))
+        except: pass
+    return out
+
+def as_str_list(xs):
+    return [str(x) for x in xs]
+
+def count_adjacent_step(digs, step):
+    try: return sum(1 for i in range(len(digs)-1) if (int(digs[i+1]) - int(digs[i])) == step)
+    except: return 0
+
+def has_run_len(digs, step, length):
+    c = 0
+    for i in range(len(digs)-1):
+        if (int(digs[i+1]) - int(digs[i])) == step:
+            c += 1
+            if c >= length: return True
+        else:
+            c = 0
+    return False
+
+def is_palindrome_str(s): return s == s[::-1]
+def nonstrict_increasing(digs):
+    diffs = [int(digs[i+1]) - int(digs[i]) for i in range(len(digs)-1)]
+    return all(d >= 0 for d in diffs) and any(d > 0 for d in diffs)
+def strict_monotone(digs, step):
+    return all((int(digs[i+1]) - int(digs[i]) == step) for i in range(len(digs)-1))
+
+# ───────────────────────────────────────────────────────────────────────────────
+# UI
+
+st.set_page_config(page_title="Filter Picker — Universal (max-compat)", layout="wide")
+st.title("Filter Picker — Universal CSV (max compatibility)")
 
 with st.expander("Paste current pool — supports continuous digits", expanded=True):
     pool_text = st.text_area(
@@ -121,6 +164,8 @@ with c3:
 
 ids_text = st.text_input("Optional: paste applicable filter IDs (comma/space separated). Leave blank to consider all compiled rows.")
 
+st.divider()
+
 cA, cB, cC = st.columns([1,1,1])
 with cA:
     min_keep = st.slider("Min winner survival (bundle)", 0.50, 0.99, 0.75, 0.01)
@@ -132,7 +177,7 @@ with cC:
 st.button("Compute / Rebuild", type="primary", use_container_width=True)
 
 # ───────────────────────────────────────────────────────────────────────────────
-# 2) Pool
+# Pool
 
 def _norm_pool(text: str) -> List[str]:
     if not text: return []
@@ -148,7 +193,7 @@ def _norm_pool(text: str) -> List[str]:
 pool = _norm_pool(pool_text)
 
 # ───────────────────────────────────────────────────────────────────────────────
-# 3) Load CSV
+# Load CSV
 
 def _enabled_value(val: str) -> bool:
     s = (val or "").strip().lower()
@@ -190,18 +235,16 @@ if ids_text.strip():
 
 all_csv_ids = {r["id"].upper() for r in filters_csv}
 missing_ids = sorted(list(requested_ids - all_csv_ids)) if requested_ids else []
-
 rows_for_compile = [r for r in filters_csv if (not requested_ids or r["id"].upper() in requested_ids)]
 
 # ───────────────────────────────────────────────────────────────────────────────
-# 4) History, letters (prev vs current), CF/LL sets
+# History, CF/LL sets derived from history
 
 def _read_history(file) -> List[str]:
     if not file: return []
     body = file.read().decode("utf-8", errors="ignore")
     file.seek(0)
-    digs = re.findall(r"\b\d{5}\b", body)
-    return digs
+    return re.findall(r"\b\d{5}\b", body)
 
 raw_hist = _read_history(hist_file)
 if raw_hist and chronology == "Latest→Earliest":
@@ -216,20 +259,17 @@ def build_letter_mapping(hist: List[str]) -> Dict[int, str]:
     if not hist:
         return {d: "ABCDEFGHIJ"[d] for d in range(10)}
     ctr = Counter(int(ch) for w in hist for ch in w)
-    order = sorted(range(10), key=lambda d: (-ctr[d], d))  # freq desc, digit asc
+    order = sorted(range(10), key=lambda d: (-ctr[d], d))
     letters = list("ABCDEFGHIJ")
     return {d: letters[i] for i, d in enumerate(order)}
 
-# current mapping from all history; previous mapping from history excluding latest seed (if available)
 current_map = build_letter_mapping(raw_hist)
 prev_hist   = raw_hist[:-1] if len(raw_hist) >= 1 else raw_hist
 previous_map = build_letter_mapping(prev_hist)
 
-# helpers: letter rank index (A=1..J=10)
 def letter_rank(letter: str) -> int:
     return "ABCDEFGHIJ".index(letter) + 1 if letter in "ABCDEFGHIJ" else 10
 
-# derive core letters for prev & current seeds (if history provided)
 prev_seed  = triples[-1][1] if triples else ""
 seed_now   = triples[-1][2] if triples else (pool[0] if pool else "00000")
 
@@ -239,23 +279,17 @@ def core_letters_from_seed(seed: str, mapping: Dict[int,str]) -> List[str]:
 prev_core_letters = core_letters_from_seed(prev_seed, previous_map)
 core_letters      = core_letters_from_seed(seed_now,  current_map)
 
-# digit->letter lookups (int & str keys)
-digit_current_letters = {d: current_map[d] for d in range(10)}
-digit_current_letters.update({str(d): current_map[d] for d in range(10)})
+digit_current_letters  = {d: current_map[d] for d in range(10)} | {str(d): current_map[d] for d in range(10)}
+digit_previous_letters = {d: previous_map[d] for d in range(10)} | {str(d): previous_map[d] for d in range(10)}
 
-digit_previous_letters = {d: previous_map[d] for d in range(10)}
-digit_previous_letters.update({str(d): previous_map[d] for d in range(10)})
-
-# cooled digits: rank moved toward cooler (higher index) vs previous
+# cooled digits (moved toward J)
 cooled_digits_int = []
 for d in range(10):
-    r_prev = letter_rank(previous_map[d])
-    r_cur  = letter_rank(current_map[d])
-    if r_cur > r_prev:
+    if letter_rank(current_map[d]) > letter_rank(previous_map[d]):
         cooled_digits_int.append(d)
 cooled_digits_str = [str(d) for d in cooled_digits_int]
 
-# ring digits: rank adjacent (±1) to ranks of any current core digit
+# ring digits: adjacent rank to any current core digit
 seed_digits_int = [int(x) for x in seed_now] if seed_now else []
 core_ranks = {letter_rank(current_map[d]) for d in seed_digits_int}
 ring_digits_int = []
@@ -265,25 +299,31 @@ for d in range(10):
         ring_digits_int.append(d)
 ring_digits_str = [str(d) for d in ring_digits_int]
 
-# new_core_digits: in current seed but not in previous seed
+# new core = in current seed, not in prev
 prev_seed_digits_int = [int(x) for x in prev_seed] if prev_seed else []
 new_core_digits_int = sorted(set(seed_digits_int) - set(prev_seed_digits_int))
 new_core_digits_str = [str(d) for d in new_core_digits_int]
 
-# loser_7_9 set (both types)
+# loser_7_9 both views
 loser_7_9_int = [7,8,9]
 loser_7_9_str = ["7","8","9"]
 
-# quick hot/cold from history (optional)
+# fixed sets frequently referenced
+fixed_core_09124_int = [0,9,1,2,4]
+fixed_core_09124_str = ["0","9","1","2","4"]
+be_digits_int = [1,4]
+be_digits_str = ["1","4"]
+
+# hot/cold (coarse) from full history — optional
 ctr_all = Counter(int(ch) for w in raw_hist for ch in w) if raw_hist else Counter()
 freq_order = [d for d,_ in ctr_all.most_common()] + [d for d in range(10) if d not in ctr_all]
 hot_digits_int  = freq_order[:4] if freq_order else []
 cold_digits_int = freq_order[-4:] if freq_order else []
-hot_digits_str  = [str(d) for d in hot_digits_int]
-cold_digits_str = [str(d) for d in cold_digits_int]
+hot_digits_str  = as_str_list(hot_digits_int)
+cold_digits_str = as_str_list(cold_digits_int)
 
 # ───────────────────────────────────────────────────────────────────────────────
-# 5) Context generator (now includes *_s variants + all CF/LL sets)
+# Context generator (INT + STR views, aliases, helpers)
 
 def gen_ctx_for_combo(seed:str, prev:str, prev2:str, combo:str):
     seed_digits = [int(x) for x in seed] if seed else []
@@ -298,47 +338,58 @@ def gen_ctx_for_combo(seed:str, prev:str, prev2:str, combo:str):
         "seed_sum_last_digit": (sum(seed_digits) % 10) if seed_digits else 0,
         "prev_seed_sum": sum(prev_digits) if prev_digits else None,
         "prev_prev_seed_sum": sum(prev2_digits) if prev2_digits else None,
+
         "seed_digits": seed_digits,
         "seed_digits_s": list(seed) if seed else [],
         "prev_seed_digits": prev_digits,
         "prev_prev_seed_digits": prev2_digits,
+
         "combo_digits": cdigits,
         "combo_digits_s": list(combo) if combo else [],
         "combo_sum": sum(cdigits),
         "combo_structure": structure_of(cdigits),
         "winner_structure": structure_of(seed_digits),
-        # vtrac/mirror
+
+        # VTRAC / MIRROR
         "MIRROR": MIRROR_PAIRS, "mirror": MIRROR_PAIRS, "mirrir": MIRROR_PAIRS,
         "MIRROR_PAIRS": MIRROR_PAIRS, "mirror_of": mirror_of,
         "V_TRAC_GROUPS": V_TRAC_GROUPS, "VTRAC_GROUPS": V_TRAC_GROUPS,
         "V_TRAC": V_TRAC_GROUPS, "VTRAC_GROUP": V_TRAC_GROUPS, "vtrac": V_TRAC_GROUPS,
+
         # helpers
         "sum_category": sum_category, "structure_of": structure_of,
         "Counter": Counter, "PRIMES": PRIMES, "EVENS": EVENS, "ODDS": ODDS,
+        "is_prime": is_prime, "is_even": is_even, "is_odd": is_odd,
         "ord": ord_safe,
+        "count_adjacent_step": count_adjacent_step,
+        "has_run_len": has_run_len,
+        "is_palindrome_str": is_palindrome_str,
+        "nonstrict_increasing": nonstrict_increasing,
+        "strict_monotone": strict_monotone,
+
         # CF letters
         "digit_current_letters": digit_current_letters,
         "digit_previous_letters": digit_previous_letters,
         "core_letters": core_letters,
         "prev_core_letters": prev_core_letters,
-        # LL-style sets (both int and string lists available)
-        "cooled_digits": cooled_digits_int,
-        "cooled_digits_s": cooled_digits_str,
-        "ring_digits": ring_digits_int,
-        "ring_digits_s": ring_digits_str,
-        "new_core_digits": new_core_digits_int,
-        "new_core_digits_s": new_core_digits_str,
-        "loser_7_9": loser_7_9_int,
-        "loser_7_9_s": loser_7_9_str,
-        "hot_digits": hot_digits_int,
-        "hot_digits_s": hot_digits_str,
-        "cold_digits": cold_digits_int,
-        "cold_digits_s": cold_digits_str,
+
+        # LL-style sets (both int and str)
+        "cooled_digits": cooled_digits_int, "cooled_digits_s": cooled_digits_str,
+        "ring_digits": ring_digits_int,     "ring_digits_s": ring_digits_str,
+        "new_core_digits": new_core_digits_int, "new_core_digits_s": new_core_digits_str,
+        "loser_7_9": loser_7_9_int, "loser_7_9_s": loser_7_9_str,
+        "hot_digits": hot_digits_int, "hot_digits_s": hot_digits_str,
+        "cold_digits": cold_digits_int, "cold_digits_s": cold_digits_str,
+
+        # common fixed sets as both types
+        "fixed_core_09124": fixed_core_09124_int,
+        "fixed_core_09124_s": fixed_core_09124_str,
+        "BE_digits": be_digits_int, "BE_digits_s": be_digits_str,
     }
     return ctx
 
 # ───────────────────────────────────────────────────────────────────────────────
-# 6) Compile rows, status, skipped report
+# Compile rows + reports
 
 def _compiles(rows):
     compiled, skipped = [], []
@@ -351,6 +402,10 @@ def _compiles(rows):
         except Exception as e:
             skipped.append((r["id"], r["name"], str(e), r.get("raw_app",""), r["raw_expr"]))
     return compiled, skipped
+
+# winner triples and seeds for dummy
+seed_now  = triples[-1][2] if triples else (pool[0] if pool else "00000")
+prev_seed = triples[-1][1] if triples else ""
 
 compiled_rows, skipped_rows = _compiles(rows_for_compile)
 
@@ -399,7 +454,7 @@ with st.expander("Skipped rows (reason + expression)", expanded=True):
         st.caption("No skipped rows 🎉")
 
 # ───────────────────────────────────────────────────────────────────────────────
-# 7) Metrics
+# Metrics
 
 def wilson_ci(k, n, z=1.96):
     if n==0: return (0.0, 0.0, 0.0)
@@ -416,6 +471,11 @@ def filter_fires(row, ctx) -> bool:
     except Exception:
         return False
 
+def _winner_triples(arr: List[str]) -> List[Tuple[str,str,str]]:
+    return [(arr[i-2], arr[i-1], arr[i]) for i in range(2, len(arr))]
+
+triples = _winner_triples(raw_hist)
+
 metrics = []
 if compiled_rows and triples and pool:
     for r in compiled_rows:
@@ -423,8 +483,7 @@ if compiled_rows and triples and pool:
         for prev2, prev1, seed in triples:
             ctx = gen_ctx_for_combo(seed, prev1, prev2, seed)
             fired = filter_fires(r, ctx)
-            keep += (not fired)
-            n += 1
+            keep += (not fired); n += 1
         p, lb, ub = wilson_ci(keep, n)
 
         elim = 0
@@ -458,7 +517,7 @@ else:
     st.stop()
 
 # ───────────────────────────────────────────────────────────────────────────────
-# 8) Greedy bundle
+# Greedy bundle
 
 def apply_filters_bundle(rows: List[Dict[str,Any]], pool: List[str],
                          latest_seed: str, prev1: str, prev2: str) -> Tuple[int, List[str]]:
