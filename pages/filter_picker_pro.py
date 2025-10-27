@@ -1,7 +1,6 @@
 # file: filter_picker_pro.py
 import io, csv, ast, math, re, textwrap
-from collections import Counter, defaultdict
-from itertools import product
+from collections import Counter
 from typing import List, Dict, Any, Tuple
 import numpy as np
 import streamlit as st
@@ -243,16 +242,43 @@ def _compiles(rows):
             _eval(r["expr_code"], dummy)
             compiled.append(r)
         except Exception as e:
-            skipped.append((r["id"], r["name"], str(e), r["raw_expr"]))
+            skipped.append((r["id"], r["name"], str(e), r.get("raw_app",""), r["raw_expr"]))
     return compiled, skipped
 
 compiled_rows, skipped_rows = _compiles(filters_csv)
 
+# Applicable IDs summary (only if user pasted ids)
+if ids_text.strip():
+    requested = {t.strip().upper() for t in re.split(r"[,\s]+", ids_text) if t.strip()}
+    compiled_ids = {r["id"].upper() for r in compiled_rows}
+    matched = len(requested & compiled_ids)
+    st.info(f"Matched Applicable IDs: {matched} / {len(requested)}")
+    missing = sorted(requested - compiled_ids)
+    if missing:
+        with st.expander("Missing requested IDs (not found or failed to compile)", expanded=False):
+            st.code(", ".join(missing), language="text")
+
+# Status + skipped report with CSV download
 st.success(f"Compiled {len(compiled_rows)} expressions; Skipped {len(skipped_rows)}.")
-with st.expander("Skipped rows (reason + expression)"):
-    for fid, name, reason, expr in skipped_rows:
-        st.caption(f"{fid} — {name}  |  {reason}")
-        st.code(expr, language="python")
+
+with st.expander("Skipped rows (reason + expression)", expanded=False):
+    # table preview
+    if skipped_rows:
+        import pandas as pd
+        sk_df = pd.DataFrame(skipped_rows, columns=["id","name","reason","applicable_if","expression"])
+        st.dataframe(sk_df, use_container_width=True, height=320)
+        # downloadable CSV
+        buff = io.StringIO()
+        sk_df.to_csv(buff, index=False)
+        st.download_button(
+            "Download skipped report (.csv)",
+            buff.getvalue().encode("utf-8"),
+            file_name="skipped_filters_report.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
+    else:
+        st.caption("No skipped rows 🎉")
 
 # Keep% (winner survival on history) and Elim% (thinning on current pool)
 def wilson_ci(k, n, z=1.96):
@@ -287,11 +313,11 @@ if compiled_rows and triples and pool:
 
         # elim on pool
         elim = 0
+        latest_seed_for_pool = triples[-1][2] if triples else (pool[0] if pool else "00000")
+        prev1_for_pool = triples[-1][1] if triples else ""
+        prev2_for_pool = triples[-1][0] if triples else ""
         for c in pool:
-            ctx = gen_ctx_for_combo(triples[-1][2] if triples else pool[0],  # use latest seed if present
-                                    triples[-1][1] if triples else "",
-                                    triples[-1][0] if triples else "",
-                                    c)
+            ctx = gen_ctx_for_combo(latest_seed_for_pool, prev1_for_pool, prev2_for_pool, c)
             if filter_fires(r, ctx): elim += 1
         elim_rate = elim / max(1, len(pool))
 
@@ -334,7 +360,7 @@ def apply_filters_bundle(rows: List[Dict[str,Any]], pool: List[str],
     return len(survivors), survivors
 
 # Helper: estimate bundle keep% from individual keep% (assumes weak dependence)
-def bundle_keep_est(selected: List[Dict[str,Any]]) -> float:
+def bundle_keep_est(selected):
     if not selected: return 1.0
     prod_elim = 1.0
     for m in selected:
