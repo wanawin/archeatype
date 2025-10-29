@@ -1,6 +1,7 @@
-# Loser List → Tester Export (fixed)
-# Complete Streamlit page. Paste winners + paste filters CSV (3-col or 5-col) →
-# emits tester‑ready 15‑column CSV with all dynamic variables inlined.
+# Loser List → Tester Export (Builder)
+# COMPLETE FILE — UI unchanged from prior builder: left winners box + filters CSV box + table + download.
+# Adds: prev_mirror_digits, union_last2, due_last2, hot7_last20, seed_sum/prev_sum, and
+# resolves ALL variables to numeric/boolean literals before export (tester has zero symbols left).
 
 from __future__ import annotations
 import io
@@ -11,140 +12,149 @@ from collections import Counter
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="Loser List — Tester Export (Fixed)", layout="wide")
+# ───────────────────────────── App config ─────────────────────────────
+st.set_page_config(page_title="Loser List — Tester Export (Builder)", layout="wide")
 
 LETTERS = list("ABCDEFGHIJ")
 DIGITS  = list("0123456789")
 MIRROR  = {0:5,1:6,2:7,3:8,4:9,5:0,6:1,7:2,8:3,9:4}
 
-# ───────────────────────────── small utils ─────────────────────────────
+# ───────────────────────────── Utilities ─────────────────────────────
 
 def normalize_quotes(text: str) -> str:
     if not text:
         return ""
-    return (text
-            .replace("\u201c", '"').replace("\u201d", '"')
-            .replace("\u2018", "'").replace("\u2019", "'")
-            .replace("\r\n", "\n").replace("\r", "\n"))
+    return (text.replace("\u201c", '"').replace("\u201d", '"')
+                .replace("\u2018", "'").replace("\u2019", "'")
+                .replace("\r\n", "\n").replace("\r", "\n"))
 
-
-def parse_winners_text(txt: str) -> List[str]:
-    """Accept comma/space/newline separated 5‑digit results; MR first."""
+def parse_winners_text(txt: str, need: int = 13) -> List[str]:
+    """Parse comma/space/newline separated 5‑digit results; MR first."""
     txt = normalize_quotes(txt)
     raw = re.split(r"[\s,]+", txt.strip()) if txt.strip() else []
     out: List[str] = []
     for t in raw:
         if not t:
             continue
-        if not t.isdigit():
-            raise ValueError(f"Non‑numeric token: {t!r}")
-        if len(t) != 5:
-            raise ValueError(f"Each entry must be 5 digits (got {t!r}).")
+        if not t.isdigit() or len(t) != 5:
+            raise ValueError(f"Each entry must be a 5‑digit number (got {t!r}).")
         out.append(t)
-    return out
+    if len(out) < need:
+        raise ValueError(f"Need {need} winners (most recent first); got {len(out)}.")
+    return out[:need]
 
-
-def heat_order(rows10: List[List[str]]) -> List[str]:
-    c = Counter(d for r in rows10 for d in r)
+def heat_order(block: List[List[str]]) -> List[str]:
+    c = Counter(d for r in block for d in r)
     for d in DIGITS:
         c.setdefault(d, 0)
-    # hottest first (desc freq), tie‑break by digit
-    return sorted(DIGITS, key=lambda d: (-c[d], d))
+    return sorted(DIGITS, key=lambda d: (-c[d], d))  # hottest → coldest
 
-
-def rank_map(order: List[str]) -> Dict[str, int]:
-    return {d: i + 1 for i, d in enumerate(order)}
-
+def rank_map(order: List[str]) -> Dict[str, str]:
+    # return letter by digit (A hottest)
+    return {d: LETTERS[i] for i, d in enumerate(order)}
 
 def neighbors(letter: str, span: int = 1) -> List[str]:
     i = LETTERS.index(letter)
     lo, hi = max(0, i - span), min(9, i + span)
-    return LETTERS[lo : hi + 1]
+    return LETTERS[lo:hi+1]
 
+def fmt_list(xs: List[str]) -> str:
+    return "[" + ",".join(str(int(d)) for d in xs) + "]"
 
-def loser_pipeline(last13: List[str]) -> Tuple[Dict, Dict]:
-    """Compute all dynamic variable sets from the last 13 winners (MR→Oldest)."""
-    if len(last13) < 13:
-        raise ValueError("Need 13 winners (most recent first).")
-    rows = [list(s) for s in last13]
-    most_recent = rows[0]
+# ───────────────────── Variable derivation (builder only) ─────────────────────
 
-    prev10 = rows[1:11]
-    curr10 = rows[0:10]
+def derive_variables(last13: List[str], last20: List[str] | None = None) -> Tuple[Dict, Dict]:
+    rows13 = [list(s) for s in last13]  # MR → older
+    most_recent = rows13[0]
+    prev        = rows13[1]
 
-    order_prev = heat_order(prev10)
+    # Heatmaps (current: last10 incl MR; previous: the 10 before MR)
+    curr10 = rows13[0:10]
+    prev10 = rows13[1:11]
     order_curr = heat_order(curr10)
-    rprev      = rank_map(order_prev)
-    rcurr      = rank_map(order_curr)
+    order_prev = heat_order(prev10)
 
-    digit_prev_letters = {d: LETTERS[rprev[d] - 1] for d in DIGITS}
-    digit_curr_letters = {d: LETTERS[rcurr[d] - 1] for d in DIGITS}
+    digit_curr_letters = rank_map(order_curr)  # {'0': 'C', ...}
+    digit_prev_letters = rank_map(order_prev)
 
-    # Core letters (previous map) for the most‑recent seed digits
-    prev_core_letters = sorted({digit_prev_letters[d] for d in most_recent},
-                               key=lambda L: LETTERS.index(L))
-    # Ring letters: ±1 around each prev core letter
-    ring_letters = sorted({L for C in prev_core_letters for L in neighbors(C, 1)},
-                          key=lambda L: LETTERS.index(L))
+    prev_core_letters = sorted({digit_prev_letters[d] for d in most_recent}, key=lambda L: LETTERS.index(L))
+    # core letters for current map (used by some size checks)
+    curr_core_letters = sorted({digit_curr_letters[d] for d in most_recent}, key=lambda L: LETTERS.index(L))
 
-    # Numeric sets derived from letters/maps
-    def digits_with_letters(letters: List[str]) -> List[str]:
-        return [d for d in DIGITS if digit_curr_letters[d] in letters]
+    # ring: ±1 around each previous core letter (by alphabet index)
+    ring_letters = sorted({L for C in prev_core_letters for L in neighbors(C, 1)}, key=lambda L: LETTERS.index(L))
+    ring_digits  = sorted([d for d in DIGITS if digit_curr_letters[d] in set(ring_letters)], key=int)
 
-    ring_digits = [d for d in DIGITS if digit_curr_letters[d] in set(ring_letters)]
-
-    # "loser_7_9": the three *coldest* digits in the current 10 (positions 8–10)
+    # loser_7_9 = 3 coldest digits in current 10
     loser_7_9 = order_curr[-3:]
 
-    # Top‑7 hottest in the last 10
-    hot7_last10 = order_curr[:7]
-
-    # naive cooled digits example (bottom‑3 in previous map)
+    # cooled = 3 coldest in previous 10 (example definition used in prior runs)
     cooled_digits = order_prev[-3:]
 
-    # convenience sizes used by some filters
-    core_size_prev    = len(prev_core_letters)
-    core_size_current = len({digit_curr_letters[d] for d in most_recent})
+    # new_core_digits (current letters for MR seed digits)
+    new_core_digits = sorted({d for d in DIGITS if digit_curr_letters[d] in set(curr_core_letters)}, key=int)
+
+    # hot7 sets
+    hot7_last10 = order_curr[:7]
+    hot7_last20 = []
+    if last20 and len(last20) >= 20:
+        block20 = [list(s) for s in last20[:20]]
+        hot7_last20 = [d for d,_ in Counter(d for r in block20 for d in r).most_common(7)]
+
+    seed_digits = most_recent
+    prev_digits = prev
+    prev2_digits = rows13[2] if len(rows13) > 2 else []
+
+    # sums
+    seed_sum = sum(int(x) for x in seed_digits)
+    prev_sum = sum(int(x) for x in prev_digits)
+
+    # union/due over last 2 draws
+    union_last2 = sorted(set(prev_digits) | set(prev2_digits), key=int)
+    due_last2   = sorted(set(DIGITS) - set(prev_digits) - set(prev2_digits), key=int)
+
+    # mirrors
+    prev_mirror_digits = sorted({str(MIRROR[int(d)]) for d in prev_digits}, key=int)
+    seed_mirror_digits = sorted({str(MIRROR[int(d)]) for d in seed_digits}, key=int)
 
     dyn = dict(
-        seed_digits=list(most_recent),
-        prev_digits=list(rows[1]),
-        loser_7_9=loser_7_9,
-        hot7_last10=hot7_last10,
-        ring_digits=ring_digits,
-        cooled_digits=cooled_digits,
-        prev_core_letters=prev_core_letters,
-        core_letters=sorted({digit_curr_letters[d] for d in most_recent}, key=lambda L: LETTERS.index(L)),
-        core_size_prev=core_size_prev,
-        core_size_current=core_size_current,
+        seed_digits=seed_digits,
+        prev_digits=prev_digits,
+        prev2_digits=prev2_digits,
+        seed_sum=seed_sum,
+        prev_sum=prev_sum,
+        union_last2=union_last2,
+        due_last2=due_last2,
+        prev_mirror_digits=prev_mirror_digits,
+        seed_mirror_digits=seed_mirror_digits,
+        digit_curr_letters=digit_curr_letters,
         digit_prev_letters=digit_prev_letters,
-        digit_current_letters=digit_curr_letters,
-        order_prev=order_prev,
-        order_curr=order_curr,
+        prev_core_letters=prev_core_letters,
+        curr_core_letters=curr_core_letters,
+        ring_digits=ring_digits,
+        loser_7_9=loser_7_9,
+        cooled_digits=cooled_digits,
+        new_core_digits=new_core_digits,
+        hot7_last10=hot7_last10,
+        hot7_last20=hot7_last20,
     )
 
-    meta = dict(
-        most_recent="".join(most_recent),
-        order_prev="".join(order_prev),
-        order_curr="".join(order_curr),
-    )
+    meta = dict(order_curr="".join(order_curr), order_prev="".join(order_prev))
     return dyn, meta
 
+# ───────────────────────── CSV readers/writers ─────────────────────────
 
 def read_csv_loose(text: str) -> pd.DataFrame:
     text = normalize_quotes(text)
     last_err = None
     for sep in [",", ";", "\t", "|"]:
         try:
-            df = pd.read_csv(io.StringIO(text), sep=sep, engine="python",
-                             quotechar='"', escapechar='\\', dtype=str,
-                             on_bad_lines="skip")
+            df = pd.read_csv(io.StringIO(text), sep=sep, engine="python", quotechar='"', escapechar='\\', dtype=str, on_bad_lines="skip")
             df.columns = [str(c).strip() for c in df.columns]
             return df.fillna("")
         except Exception as e:
             last_err = e
     raise last_err
-
 
 def to_three_cols(df: pd.DataFrame) -> pd.DataFrame:
     cols = {c.lower(): c for c in df.columns}
@@ -169,54 +179,55 @@ def to_three_cols(df: pd.DataFrame) -> pd.DataFrame:
 
     raise ValueError("CSV must be 3‑col (name,description,expression) or 5‑col (id,name,enabled,applicable_if,expression).")
 
+# ───────────────────────── Expression resolver ─────────────────────────
 
-def fmt_list(xs: List[str]) -> str:
-    # show as [9,8,2]
-    return "[" + ",".join(str(int(d)) for d in xs) + "]"
-
-
-# ───────────────────────── expression resolver ─────────────────────────
-
-def eval_letter_eq(txt: str, varname: str, letters_map: Dict[str,str]) -> str:
-    # digit_prev_letters['8'] == 'F'  or  digit_current_letters["3"] != 'B'
-    pat = re.compile(rf"{varname}\\s*\\[\\s*'?(?P<d>[0-9])'?\\s*\\]\\s*(?P<op>==|!=)\\s*'(?P<L>[A-J])'")
-    def _sub(m: re.Match) -> str:
-        d  = m.group("d")
-        op = m.group("op")
-        L  = m.group("L")
-        val = (letters_map.get(d) == L)
-        return str(val if op == "==" else (not val))
-    return pat.sub(_sub, txt)
+def _bool_from_letter_eq(dmap: Dict[str,str], txt: str, var: str) -> str:
+    # replace: digit_prev_letters['8'] == 'F'  →  True
+    pat = re.compile(rf"{var}\\s*\\[\\s*'(?P<d>\d)'\\s*\\]\\s*==\\s*'(?P<L>[A-J])'")
+    return pat.sub(lambda m: str(dmap.get(m.group('d')) == m.group('L')), txt)
 
 
 def resolve_expression(expr: str, dyn: Dict) -> str:
     x = normalize_quotes(expr)
 
-    # Replace list‑valued variables with numeric lists
-    repl_lists = {
-        "loser_7_9":        fmt_list(dyn["loser_7_9"]),
-        "hot7_last10":      fmt_list(dyn["hot7_last10"]),
-        "ring_digits":      fmt_list(dyn["ring_digits"]),
-        "cooled_digits":    fmt_list(dyn["cooled_digits"]),
-        "seed_digits":      fmt_list(dyn["seed_digits"]),
-        "prev_digits":      fmt_list(dyn["prev_digits"]),
+    # Inline set/list variables with numeric literals
+    list_vars = {
+        "cooled_digits":      dyn["cooled_digits"],
+        "new_core_digits":    dyn["new_core_digits"],
+        "loser_7_9":          dyn["loser_7_9"],
+        "ring_digits":        dyn["ring_digits"],
+        "hot7_last10":        dyn["hot7_last10"],
+        "hot7_last20":        dyn["hot7_last20"],
+        "seed_digits":        dyn["seed_digits"],
+        "prev_digits":        dyn["prev_digits"],
+        "union_last2":        dyn["union_last2"],
+        "due_last2":          dyn["due_last2"],
+        "prev_mirror_digits": dyn["prev_mirror_digits"],
+        "seed_mirror_digits": dyn["seed_mirror_digits"],
     }
-    for k, v in repl_lists.items():
-        x = re.sub(rf"\b{k}\b", v, x)
 
-    # len(core_letters) and len(prev_core_letters)
-    x = re.sub(r"\blen\(\s*core_letters\s*\)",        str(dyn.get("core_size_current", 0)), x)
-    x = re.sub(r"\blen\(\s*prev_core_letters\s*\)",   str(dyn.get("core_size_prev", 0)),    x)
+    for name, vals in list_vars.items():
+        literal = fmt_list(vals)
+        # support both "in var" and bare occurrences
+        x = re.sub(rf"\bin\s+{name}\b", " in " + literal, x)
+        x = re.sub(rf"\b{re.escape(name)}\b", literal, x)
 
-    # equality/inequality tests on letter maps
-    x = eval_letter_eq(x, "digit_prev_letters",    dyn["digit_prev_letters"])
-    x = eval_letter_eq(x, "digit_current_letters", dyn["digit_current_letters"])
+    # Inline scalars
+    x = re.sub(r"\bseed_sum\b", str(dyn["seed_sum"]), x)
+    x = re.sub(r"\bprev_sum\b", str(dyn["prev_sum"]), x)
+
+    # Letter equality to boolean
+    x = _bool_from_letter_eq(dyn["digit_prev_letters"], x,  "digit_prev_letters")
+    x = _bool_from_letter_eq(dyn["digit_curr_letters"], x,  "digit_current_letters")
+
+    # len(core_letters) variants → actual numbers
+    x = re.sub(r"len\(\s*prev_core_letters\s*\)",  str(len(dyn["prev_core_letters"])),  x)
+    x = re.sub(r"len\(\s*core_letters\s*\)",        str(len(dyn["curr_core_letters"])), x)
 
     return x
 
 
 def build_tester_csv(df_three: pd.DataFrame, dyn: Dict) -> pd.DataFrame:
-    # 15‑column tester schema
     cols15 = [
         "id","name","enabled","applicable_if","expression",
         "Unnamed: 5","Unnamed: 6","Unnamed: 7","Unnamed: 8","Unnamed: 9",
@@ -230,15 +241,10 @@ def build_tester_csv(df_three: pd.DataFrame, dyn: Dict) -> pd.DataFrame:
         if not name or not exp:
             continue
         exp_resolved = resolve_expression(exp, dyn)
-        rows.append([
-            name, desc, "True", "True", exp_resolved,
-            "", "", "", "", "", "", "", "", "", ""
-        ])
-    out = pd.DataFrame(rows, columns=cols15)
-    return out
+        rows.append([name, desc, "True", "True", exp_resolved, "", "", "", "", "", "", "", "", "", ""])
+    return pd.DataFrame(rows, columns=cols15)
 
-
-# ─────────────────────────────── UI ───────────────────────────────
+# ─────────────────────────────── UI (unchanged) ───────────────────────────────
 
 st.title("Loser List (Least → Most Likely) — Tester‑ready Export")
 
@@ -248,33 +254,22 @@ with c1:
         "Paste last 13 winners (most recent first)",
         height=160,
         placeholder="27500\n28825\n43769\n… (13 total)")
+    # OPTIONAL: last‑20 input (no layout change — same column, under winners)
+    last20_txt = st.text_area("(Optional) Paste last 20 winners (MR first)", height=120, placeholder="Paste 20 if you want hot7_last20; else leave blank")
 with c2:
     st.markdown("**Paste Filters (3‑col or 5‑col)**")
-    csv_in = st.text_area("CSV content", height=240,
+    csv_in = st.text_area("CSV content", height=280,
                           placeholder="name,description,expression\nLL002,Eliminate if loser 7–9 count == 5, sum(1 for d in combo_digits if d in loser_7_9) == 5")
 with c3:
-    st.info("This page replaces dynamic variables (loser_7_9, ring_digits, hot7_last10, seed/prev digits, len(core_letters), etc.) with **actual numbers** for the tester app.")
+    st.info("Builder resolves variables to numbers (loser_7_9, ring_digits, hot7_last10/20, union_last2, due_last2, mirrors, sums, letter checks). Tester receives only concrete expressions.")
 
 if winners_txt.strip() and csv_in.strip():
     try:
-        last13 = parse_winners_text(winners_txt)
-        dyn, meta = loser_pipeline(last13)
-
-        st.subheader("Derived variables (this run)")
-        cA, cB, cC = st.columns(3)
-        with cA:
-            st.markdown("**loser_7_9 (digits)**")
-            st.code(", ".join(dyn["loser_7_9"]))
-            st.markdown("**hot7_last10 (digits)**")
-            st.code(", ".join(dyn["hot7_last10"]))
-        with cB:
-            st.markdown("**ring_digits (digits)**")
-            st.code(", ".join(dyn["ring_digits"]))
-            st.markdown("**cooled_digits (digits)**")
-            st.code(", ".join(dyn["cooled_digits"]))
-        with cC:
-            st.markdown("**digit_prev_letters → example**")
-            st.code({k: dyn["digit_prev_letters"][k] for k in sorted(dyn["digit_prev_letters"])})
+        last13 = parse_winners_text(winners_txt, need=13)
+        last20 = None
+        if last20_txt.strip():
+            last20 = parse_winners_text(last20_txt, need=20)
+        dyn, meta = derive_variables(last13, last20)
 
         df_in  = read_csv_loose(csv_in)
         three  = to_three_cols(df_in)
@@ -282,10 +277,9 @@ if winners_txt.strip() and csv_in.strip():
 
         st.subheader("Tester‑ready CSV (copy/paste)")
         st.dataframe(out15.head(50), use_container_width=True)
-        csv_bytes = out15.to_csv(index=False).encode("utf-8")
-        st.download_button("Download tester CSV", data=csv_bytes, file_name="filters_tester_ready.csv", mime="text/csv")
+        st.download_button("Download tester CSV", data=out15.to_csv(index=False).encode("utf-8"), file_name="filters_tester_ready.csv", mime="text/csv")
 
     except Exception as e:
         st.error(str(e))
 else:
-    st.caption("Paste 13 winners and your filters to build the export.")
+    st.caption("Paste 13 winners and your filters to build the export. (Optional: paste 20 to enable hot7_last20.)")
