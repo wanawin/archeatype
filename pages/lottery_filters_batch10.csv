@@ -792,8 +792,8 @@ LL006j,Eliminate if core-ring count <= 2,TRUE,,"sum(1 for d in combo_digits if d
 LL006k,Eliminate if core-ring count == 3,TRUE,,"sum(1 for d in combo_digits if d  in [1,2,5,6,8,9]) == 3",,,,,,,,,,
 LL006l,Eliminate if core-ring count < 4,TRUE,,"sum(1 for d in combo_digits if d  in [1,2,5,6,8,9]) < 4",,,,,,,,,,
 LL006m,Eliminate if core-ring count <= 3,TRUE,,"sum(1 for d in combo_digits if d  in [1,2,5,6,8,9]) <= 3",,,,,,,,,,
-LL007,"If prev heatmap F→I, require I(8)",TRUE,,True,,,,,,,,,,
-LL008,"If prev heatmap G→I, require I(8)",TRUE,,True,,,,,,,,,,
+LL007,"If prev heatmap F→I, require digit 8",TRUE,,"(digit_prev_letters['8']=='F' and digit_current_letters['8']=='I') and (8 not in combo_digits)"
+LL008,"If prev heatmap G→I, require digit 8",TRUE,,"(digit_prev_letters['8']=='G' and digit_current_letters['8']=='I') and (8 not in combo_digits)"
 LL009,Eliminate if a cooled digit repeats,TRUE,,any(combo_digits.count(d) > 1 for d  in [6]),,,,,,,,,,
 LL011,Eliminate if loser 7–9 count < 0,TRUE,,"sum(1 for d in combo_digits if d   in [3,7,0]) < 0",,,,,,,,,,
 LL011a,Eliminate if loser 7–9 count > 5,TRUE,,"sum(1 for d in combo_digits if d   in [3,7,0]) > 5",,,,,,,,,,
