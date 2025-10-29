@@ -3,7 +3,7 @@
 
 import io
 import re
-from typing import Dict, List
+from typing import Dict, List, Set
 from collections import Counter
 
 import pandas as pd
@@ -97,7 +97,7 @@ def loser_list(last13: List[str]):
         "rank_prev_map":         rank_prev,
     }
 
-def ring_digits_from_letters(ring_letters, digit_curr_letters) -> List[str]:
+def ring_digits_from_letters(ring_letters: Set[str], digit_curr_letters: Dict[str,str]) -> List[str]:
     return [d for d in DIGITS if digit_curr_letters.get(d) in ring_letters]
 
 def _read_csv_loose(text: str) -> pd.DataFrame:
@@ -124,6 +124,7 @@ def to_three_cols(df: pd.DataFrame) -> pd.DataFrame:
     cols = set(c.lower() for c in df.columns)
     lower_map = {c.lower(): c for c in df.columns}
 
+    # 3-col path
     if {"name","description","expression"}.issubset(cols) and "id" not in cols:
         out = df[[lower_map["name"], lower_map["description"], lower_map["expression"]]].copy()
         out.columns = ["name","description","expression"]
@@ -131,6 +132,7 @@ def to_three_cols(df: pd.DataFrame) -> pd.DataFrame:
         out = out[out["name"].str.lower() != "name"]
         return out.reset_index(drop=True)
 
+    # 5-col path
     needed = {"id","name","enabled","applicable_if","expression"}
     if needed.issubset(cols):
         out = df[[lower_map["id"], lower_map["name"], lower_map["enabled"],
@@ -148,7 +150,7 @@ def to_three_cols(df: pd.DataFrame) -> pd.DataFrame:
     raise ValueError("CSV must be 3-col (name,description,expression) or 5-col (id,name,enabled,applicable_if,expression).")
 
 def fmt_digits_list(xs: List[str]) -> str:
-    return "[" + ",".join(str(int(d)) for d in xs) + "]"  # fixed: dot before join
+    return "[" + ",".join(str(int(d)) for d in xs) + "]"
 
 # -----------------------------
 # Export context (numbers only)
@@ -170,18 +172,29 @@ def compute_numeric_context(last13: List[str], last20_opt: List[str]) -> Dict:
     digit_current_letters = {d: LETTERS[rank_curr[d] - 1] for d in DIGITS}
     digit_prev_letters    = {d: LETTERS[rank_prev[d]  - 1] for d in DIGITS}
 
-    prev_core_letters = sorted({digit_prev_letters[d] for d in seed_digits}, key=lambda L: LETTERS.index(L))
+    # previous-core letters (mapped from prev-letter map) & ring
+    prev_core_letters = sorted({digit_prev_letters[d] for d in seed_digits},
+                               key=lambda L: LETTERS.index(L))
     ring_letters = set()
     for L in prev_core_letters:
         ring_letters.update(neighbors(L, 1))
     ring_digits = [d for d in DIGITS if digit_current_letters[d] in ring_letters]
 
-    curr_core_letters = sorted({digit_current_letters[d] for d in seed_digits}, key=lambda L: LETTERS.index(L))
-    new_core_digits   = [d for d in DIGITS if digit_current_letters[d] in set(curr_core_letters)]
+    # current-core letters (not used by tester directly, but helpful for booleans)
+    curr_core_letters = sorted({digit_current_letters[d] for d in seed_digits},
+                               key=lambda L: LETTERS.index(L))
 
-    cooled_digits = [d for d in DIGITS if rank_curr[d] > rank_prev[d]]
+    # digits whose **current** letter is in the **previous** core letters
+    prev_core_currentmap_digits = [d for d in DIGITS if digit_current_letters[d] in set(prev_core_letters)]
+
+    # rank changes
+    cooled_digits   = [d for d in DIGITS if rank_curr[d] > rank_prev[d]]
+    new_core_digits = [d for d in DIGITS if digit_current_letters[d] in set(curr_core_letters)]
+
+    # loser 7–9 (cold end of current order)
     loser_7_9 = order_curr[-3:]
 
+    # hot sets
     hot7_last10 = order_curr[:7]
     hot7_last20: List[str] = []
     if last20_opt and len(last20_opt) >= 20:
@@ -190,19 +203,24 @@ def compute_numeric_context(last13: List[str], last20_opt: List[str]) -> Dict:
             c.setdefault(d, 0)
         hot7_last20 = [d for d, _ in c.most_common(7)]
 
+    # mirrors
     prev_mirror_digits = sorted({str(MIRROR[int(d)]) for d in prev_digits}, key=int)
     seed_mirror_digits = sorted({str(MIRROR[int(d)]) for d in seed_digits}, key=int)
 
+    # union / due (last two draws)
     union_last2 = sorted(set(prev_digits) | set(prev2_digits), key=int)
     due_last2   = sorted(set(DIGITS) - set(prev_digits) - set(prev2_digits), key=int)
 
+    # core-size booleans
     core_size = len(prev_core_letters)
     core_size_flags = {
         "core_size_eq_2":   core_size == 2,
         "core_size_eq_5":   core_size == 5,
         "core_size_in_2_5": core_size in {2,5},
+        "core_size_in_235": core_size in {2,3,5},   # <-- added for CF004a_gated_J
     }
 
+    # sums
     seed_sum = sum(int(x) for x in seed_digits)
     prev_sum = sum(int(x) for x in prev_digits)
 
@@ -215,6 +233,7 @@ def compute_numeric_context(last13: List[str], last20_opt: List[str]) -> Dict:
         loser_7_9=loser_7_9, hot7_last10=hot7_last10, hot7_last20=hot7_last20,
         prev_mirror_digits=prev_mirror_digits, seed_mirror_digits=seed_mirror_digits,
         union_last2=union_last2, due_last2=due_last2,
+        prev_core_currentmap_digits=prev_core_currentmap_digits,
         core_size_flags=core_size_flags,
     )
 
@@ -227,7 +246,7 @@ def resolve_expression(expr: str, ctx: Dict) -> str:
     # quoted digits → bare ints
     x = re.sub(r"'([0-9])'", r"\1", x)
 
-    # digit_prev_letters['8']=='F' / digit_current_letters['3']!='B'
+    # digit_prev/current_letters['8'] == 'F'  or  != 'F'
     def eval_letter_eq(txt: str, which: str, letters_map: Dict[str, str]) -> str:
         pat = re.compile(rf"{which}\s*\[\s*([0-9])\s*\]\s*([=!]=)\s*'([A-J])'")
         def _sub(m):
@@ -239,7 +258,26 @@ def resolve_expression(expr: str, ctx: Dict) -> str:
     x = eval_letter_eq(x, "digit_prev_letters",    ctx.get("digit_prev_letters", {}))
     x = eval_letter_eq(x, "digit_current_letters", ctx.get("digit_current_letters", {}))
 
-    # Replace list vars everywhere (supports both “in var” and bare “var”)
+    # digit_current_letters[var] in ['A','B',...']  --> var in [digit list]
+    pat_letters_membership = re.compile(
+        r"digit_current_letters\s*\[\s*([A-Za-z_]\w*)\s*\]\s*in\s*\[(.*?)\]"
+    )
+    def sub_letter_membership(m):
+        var_d = m.group(1)
+        raw   = m.group(2)
+        letters_raw = [tok.strip() for tok in raw.split(",") if tok.strip()]
+        letters = [s.strip("'\"") for s in letters_raw]
+        allowed = [d for d in DIGITS if ctx["digit_current_letters"].get(d) in letters]
+        return f"{var_d} in {fmt_digits_list(allowed)}"
+    x = pat_letters_membership.sub(sub_letter_membership, x)
+
+    # digit_current_letters[var] in prev_core_letters  --> var in prev_core_currentmap_digits
+    pat_in_prev_core = re.compile(r"digit_current_letters\s*\[\s*([A-Za-z_]\w*)\s*\]\s*in\s*prev_core_letters")
+    if ctx.get("prev_core_currentmap_digits") is not None:
+        allowed = fmt_digits_list(ctx["prev_core_currentmap_digits"])
+        x = pat_in_prev_core.sub(lambda m: f"{m.group(1)} in {allowed}", x)
+
+    # Replace list vars (supports both “in var” and bare “var”)
     list_vars = {
         "cooled_digits":      ctx["cooled_digits"],
         "new_core_digits":    ctx["new_core_digits"],
@@ -253,11 +291,20 @@ def resolve_expression(expr: str, ctx: Dict) -> str:
         "seed_mirror_digits": ctx["seed_mirror_digits"],
         "union_last2":        ctx["union_last2"],
         "due_last2":          ctx["due_last2"],
+        "prev_core_currentmap_digits": ctx["prev_core_currentmap_digits"],
     }
     for name, arr in list_vars.items():
         lit = fmt_digits_list(arr)
         x = re.sub(rf"\bin\s+{name}\b", " in " + lit, x)
         x = re.sub(rf"\b{name}\b", lit, x)
+
+    # Replace letter-in-set booleans to True/False
+    def letter_contains(txt: str, varname: str, letters: Set[str]) -> str:
+        p = re.compile(r"'([A-J])'\s+in\s+" + re.escape(varname))
+        return p.sub(lambda mm: "True" if mm.group(1) in letters else "False", txt)
+
+    x = letter_contains(x, "prev_core_letters", set(ctx["prev_core_letters"]))
+    x = letter_contains(x, "core_letters",      set(ctx["curr_core_letters"]))
 
     # Scalar sums
     x = re.sub(r"\bseed_sum\b", str(ctx.get("seed_sum", 0)), x)
@@ -344,9 +391,12 @@ def render_context_panels(info: Dict, last13: List[str], last20_opt: List[str]):
         hot7_last20 = [d for d, _ in c.most_common(7)]
 
     core_size = len({info["digit_prev_letters"][d] for d in seed_digits}) if seed_digits else 0
-    core_size_flags = {"core_size_eq_2": core_size == 2,
-                       "core_size_eq_5": core_size == 5,
-                       "core_size_in_2_5": core_size in {2,5}}
+    core_size_flags = {
+        "core_size_eq_2": core_size == 2,
+        "core_size_eq_5": core_size == 5,
+        "core_size_in_2_5": core_size in {2,5},
+        "core_size_in_235": core_size in {2,3,5},  # keep panel + export in sync
+    }
 
     # session for reuse
     st.session_state.update({
