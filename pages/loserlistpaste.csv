@@ -1,7 +1,7 @@
 id,name,enabled,applicable_if,expression,Unnamed: 5,Unnamed: 6,Unnamed: 7,Unnamed: 8,Unnamed: 9,Unnamed: 10,Unnamed: 11,Unnamed: 12,Unnamed: 13,Unnamed: 14
-CF004b_only2,Eliminate if core size == 2,TRUE,"(len(core_letters) == 2)","True",,,,,,,,,
-CF004d_only5,Eliminate if core size == 5,TRUE,"(len(core_letters) == 5)","True",,,,,,,,,
-CF004e_2or5,Eliminate if core size in {2,5},TRUE,"(len(core_letters) in {2,5})","True",,,,,,,,,
+CF004b_only2,ELIMINATE if combo has FEWER THAN 3 of {seed-2-bucket digits:[b1,b2,...]},TRUE,,"sum(1 for d in combo_digits if d in [b1,b2,...]) < 3",,,,,,,,,,
+CF004d_only5,ELIMINATE if combo has FEWER THAN 2 of {seed-5-bucket digits:[c1,c2,...]},TRUE,,"sum(1 for d in combo_digits if d in [c1,c2,...]) < 2",,,,,,,,,,
+CF005a_run_extremes,ELIMINATE if combo has ≥3 of {edge-run digits:[e1,e2,...]},TRUE,,"sum(1 for d in combo_digits if d in [e1,e2,...]) >= 3",,,,,,,,,,
 CF005a_run_extremes,Eliminate if 3-letter run starts at A/B/C or H,TRUE,"(('A' in core_letters) or ('B' in core_letters) or ('C' in core_letters) or ('H' in core_letters))","True",,,,,,,,,
 CF006,If previous core had J, require next to include E/F/H and not any of 4,5,7,TRUE,"('J' in prev_core_letters)","not any(d in combo_digits for d in [4,5,7])",,,,,,,,
 LL002,Eliminate if loser 7–9 count == 5,TRUE,,"sum(1 for d in combo_digits if d  in loser_7_9) == 5",,,,,,,,,
