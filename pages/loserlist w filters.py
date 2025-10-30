@@ -66,7 +66,7 @@ def loser_list(last13: List[str]):
 
     # digit -> letter maps (A hottest … J coldest)
     digit_prev_letters  = {d: LETTERS[rank_prev[d]  - 1] for d in DIGITS}
-    digit_current_letters  = {d: LETTERS[rank_curr[d]  - 1] for d in DIGITS}
+    digit_curr_letters  = {d: LETTERS[rank_curr[d]  - 1] for d in DIGITS}
 
     # core letters = previous-map letters of MR digits
     most_recent = rows[0]
@@ -80,7 +80,7 @@ def loser_list(last13: List[str]):
 
     # simple ranking (kept for compatibility)
     def tier(d: str) -> int:
-        L = digit_current_letters[d]
+        L = digit_curr_letters[d]
         if L in core_letters_prevmap: return 3
         if L in ring_letters:         return 2
         return 1
@@ -89,7 +89,7 @@ def loser_list(last13: List[str]):
     return ranking, {
         "current_map_order": "".join(order_curr),
         "previous_map_order": "".join(order_prev),
-        "digit_current_letters": digit_current_letters,
+        "digit_current_letters": digit_curr_letters,
         "digit_prev_letters":    digit_prev_letters,
         "core_letters_prevmap":  core_letters_prevmap,
         "ring_letters":          sorted(ring_letters, key=lambda L: LETTERS.index(L)),
@@ -172,6 +172,12 @@ def compute_numeric_context(last13: List[str], last20_opt: List[str]) -> Dict:
     digit_current_letters = {d: LETTERS[rank_curr[d] - 1] for d in DIGITS}
     digit_prev_letters    = {d: LETTERS[rank_prev[d]  - 1] for d in DIGITS}
 
+    # NEW: transitions — digits whose prev letter == F|G and current letter == I
+    trans_FI = [d for d in DIGITS
+                if digit_prev_letters.get(d) == 'F' and digit_current_letters.get(d) == 'I']
+    trans_GI = [d for d in DIGITS
+                if digit_prev_letters.get(d) == 'G' and digit_current_letters.get(d) == 'I']
+
     # previous-core letters (mapped from prev-letter map) & ring
     prev_core_letters = sorted({digit_prev_letters[d] for d in seed_digits},
                                key=lambda L: LETTERS.index(L))
@@ -180,7 +186,7 @@ def compute_numeric_context(last13: List[str], last20_opt: List[str]) -> Dict:
         ring_letters.update(neighbors(L, 1))
     ring_digits = [d for d in DIGITS if digit_current_letters[d] in ring_letters]
 
-    # current-core letters (not used by tester directly, but helpful for booleans)
+    # current-core letters
     curr_core_letters = sorted({digit_current_letters[d] for d in seed_digits},
                                key=lambda L: LETTERS.index(L))
 
@@ -211,13 +217,13 @@ def compute_numeric_context(last13: List[str], last20_opt: List[str]) -> Dict:
     union_last2 = sorted(set(prev_digits) | set(prev2_digits), key=int)
     due_last2   = sorted(set(DIGITS) - set(prev_digits) - set(prev2_digits), key=int)
 
-    # core-size booleans (kept for internal use only — not exported)
+    # core-size booleans
     core_size = len(prev_core_letters)
     core_size_flags = {
         "core_size_eq_2":   core_size == 2,
         "core_size_eq_5":   core_size == 5,
         "core_size_in_2_5": core_size in {2,5},
-        "core_size_in_235": core_size in {2,3,5},
+        "core_size_in_235": core_size in {2,3,5},   # kept for gating variants
     }
 
     # sums
@@ -235,6 +241,9 @@ def compute_numeric_context(last13: List[str], last20_opt: List[str]) -> Dict:
         union_last2=union_last2, due_last2=due_last2,
         prev_core_currentmap_digits=prev_core_currentmap_digits,
         core_size_flags=core_size_flags,
+        # NEW: transitions for builder → tester numeric export
+        trans_FI=trans_FI,
+        trans_GI=trans_GI,
     )
 
 # -----------------------------
@@ -277,7 +286,7 @@ def resolve_expression(expr: str, ctx: Dict) -> str:
         allowed = fmt_digits_list(ctx["prev_core_currentmap_digits"])
         x = pat_in_prev_core.sub(lambda m: f"{m.group(1)} in {allowed}", x)
 
-    # Replace list vars
+    # Replace list vars (supports both “in var” and bare “var”)
     list_vars = {
         "cooled_digits":      ctx["cooled_digits"],
         "new_core_digits":    ctx["new_core_digits"],
@@ -292,6 +301,9 @@ def resolve_expression(expr: str, ctx: Dict) -> str:
         "union_last2":        ctx["union_last2"],
         "due_last2":          ctx["due_last2"],
         "prev_core_currentmap_digits": ctx["prev_core_currentmap_digits"],
+        # NEW: transitions
+        "trans_FI":           ctx.get("trans_FI", []),
+        "trans_GI":           ctx.get("trans_GI", []),
     }
     for name, arr in list_vars.items():
         lit = fmt_digits_list(arr)
@@ -310,7 +322,7 @@ def resolve_expression(expr: str, ctx: Dict) -> str:
     x = re.sub(r"\bseed_sum\b", str(ctx.get("seed_sum", 0)), x)
     x = re.sub(r"\bprev_sum\b", str(ctx.get("prev_sum", 0)), x)
 
-    # Core-size flags (not for tester; only for local resolution)
+    # Core-size boolean symbols → True/False
     for key, val in (ctx.get("core_size_flags") or {}).items():
         x = re.sub(rf"\b{re.escape(key)}\b", "True" if val else "False", x)
 
@@ -443,34 +455,18 @@ if compute:
         if len(last13) < 13:
             st.error("Please provide at least 13 winners (MR→Oldest).")
         else:
-            # === SAFETY ADDITION: auto-derive last20 from first box if second is empty ===
-            winners_all = parse_winners_text(st.session_state.get("winners_text",""), pad4=st.session_state.get("pad4", True))
-            if not st.session_state.get("winners20_text","").strip() and len(winners_all) >= 20:
-                last20_opt = winners_all[:20]
-            else:
-                last20_opt = parse_winners_text(st.session_state.get("winners20_text",""),
-                                                pad4=st.session_state.get("pad4", True)) if st.session_state.get("winners20_text","").strip() else []
-            st.session_state["last20"] = last20_opt
-            # ==========================================================================
-
             ranking, info = loser_list(last13)
             st.session_state["info"] = info
             st.session_state["last13"] = last13
-            render_context_panels(info, last13, st.session_state.get("last20", []))
+            last20_opt = parse_winners_text(st.session_state.get("winners20_text",""),
+                                            pad4=st.session_state.get("pad4", True)) if st.session_state.get("winners20_text","").strip() else []
+            st.session_state["last20"] = last20_opt
+            render_context_panels(info, last13, last20_opt)
     except Exception as e:
         st.error(str(e))
 
 # Re-render if already computed
 if "info" in st.session_state and "last13" in st.session_state:
-    # === SAFETY ADDITION ON RERENDER: keep last20 auto-filled if needed ===
-    if "last20" not in st.session_state:
-        winners_all = parse_winners_text(st.session_state.get("winners_text",""), pad4=st.session_state.get("pad4", True)) if st.session_state.get("winners_text","") else []
-        if not st.session_state.get("winners20_text","").strip() and len(winners_all) >= 20:
-            st.session_state["last20"] = winners_all[:20]
-        else:
-            st.session_state["last20"] = parse_winners_text(st.session_state.get("winners20_text",""),
-                                                            pad4=st.session_state.get("pad4", True)) if st.session_state.get("winners20_text","").strip() else []
-    # ===========================================================================
     render_context_panels(st.session_state["info"], st.session_state["last13"], st.session_state.get("last20", []))
 
     st.markdown("---")
