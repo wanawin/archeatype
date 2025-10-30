@@ -307,13 +307,10 @@ def resolve_expression(expr: str, ctx: Dict) -> str:
 
     return x
 
-def resolve_text_placeholders(text: str, ctx: Dict) -> str:
-    """
-    Optional: if your 'description' contains tags like {seed-bucket digits},
-    {edge-AC}, {edge-HJ}, etc., we substitute numeric lists for visibility.
-    """
-    t = normalize_quotes(text or "")
+# NEW: also resolve placeholders in ID/Name text so the tester sees digits
 
+def resolve_text_placeholders(text: str, ctx: Dict) -> str:
+    t = normalize_quotes(text or "")
     repls = {
         "{seed-bucket digits}": fmt_list(ctx["prev_core_currentmap_digits"]),
         "{edge-AC}":            fmt_list(ctx["edge_AC"]),
@@ -328,6 +325,8 @@ def resolve_text_placeholders(text: str, ctx: Dict) -> str:
     for k, v in repls.items():
         t = t.replace(k, v)
     return t
+
+# By design, we DO NOT alter the UI/UX — we only add numeric resolving.
 
 def build_tester_csv_from_paste(pasted_text: str, ctx: Dict) -> pd.DataFrame:
     df3 = to_three_cols(_read_csv_loose(pasted_text))
@@ -385,6 +384,8 @@ with st.form("winners_form"):
                                  help="Needed only for *Last-20 Hot* filters.")
     compute = st.form_submit_button("Compute")
 
+# small helper for bar charts
+
 def counts_frame(counts: Counter) -> pd.DataFrame:
     df = pd.DataFrame({"digit": [int(d) for d in DIGITS],
                        "count": [int(counts[str(d)]) for d in range(10)]})
@@ -422,7 +423,6 @@ def render_loser_lists(loser_ranking: List[str], ctx: Dict):
 
 def render_resolved_variables(ctx: Dict):
     st.subheader("Resolved variables (this run)")
-    # show a wide set (your earlier panel plus more)
     rows = [
         ("seed_digits",           ctx["seed_digits"]),
         ("prev_digits",           ctx["prev_digits"]),
@@ -467,7 +467,7 @@ if compute:
             st.session_state["ctx"] = ctx
             st.session_state["loser_ranking"] = loser_ranking
 
-            # Panels
+            # Panels — unchanged visual layout
             render_heat_maps(ctx)
             render_loser_lists(loser_ranking, ctx)
             render_resolved_variables(ctx)
@@ -484,8 +484,7 @@ if "ctx" in st.session_state:
             "CSV content",
             key="mega_csv",
             height=220,
-            help="Accepts either 3-col (name,description,expression) or 5-col (id,name,enabled,applicable_if,expression). "
-                 "Names/descriptions may include placeholders like {seed-bucket digits}, {edge-AC}, {edge-HJ} for readability."
+            help="Accepts either 3-col (name,description,expression) or 5-col (id,name,enabled,applicable_if,expression). Names/descriptions may include placeholders like {seed-bucket digits}, {edge-AC}, {edge-HJ} for readability."
         )
         build = st.form_submit_button("Build Tester CSV")
 
