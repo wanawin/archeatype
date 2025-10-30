@@ -749,7 +749,6 @@ CF005a_run_extremes,ELIMINATE if combo has ≥3 edge digits (A–C or H–J) whe
 CF004c_only3,ELIMINATE if unique-digit count == 3 (exactly three distinct digits),TRUE,,len(set(combo_digits)) == 3,,,,,,,,,,
 CF004d_only5,"ELIMINATE if combo has ≥4 of [0,3,4,9]",TRUE,,"sum(1 for d in combo_digits if d  in [0,3,4,9]) >= 4",,,,,,,,,,
 CF004b_only2,"ELIMINATE if combo has FEWER THAN 3 of [0,3,4,9]",TRUE,,"sum(1 for d in combo_digits if d  in [0,3,4,9]) < 3",,,,,,,,,,
-CF005a_run_extremes,ELIMINATE if combo has ≥3 of {edge-run digits: (A–C) OR (H–J)},TRUE,,"(sum(1 for d in combo_digits if d  in [0,5,7]) >= 3) or (sum(1 for d in combo_digits if d  in [1,6,9]) >= 3)",,,,,,,,,,
 LL002,Eliminate if loser 7–9 count == 5,TRUE,,"sum(1 for d in combo_digits if d   in [6,9,1]) == 5",,,,,,,,,,
 LL002a,Eliminate if loser 7–9 count >= 5,TRUE,,"sum(1 for d in combo_digits if d   in [6,9,1]) >= 5",,,,,,,,,,
 LL002b,Eliminate if loser 7–9 count > 4,TRUE,,"sum(1 for d in combo_digits if d   in [6,9,1]) > 4",,,,,,,,,,
