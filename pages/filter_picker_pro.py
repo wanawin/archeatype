@@ -1,13 +1,16 @@
 # file: filter_picker_pro.py
-import io, csv, ast, math, re, textwrap, warnings  # [FIX] warnings added
+import io, csv, ast, math, re, textwrap, warnings
 from collections import Counter, defaultdict
 from typing import List, Dict, Any, Tuple
 import numpy as np
 import streamlit as st
 import pandas as pd
 
+# Silence noisy "invalid decimal literal" warnings globally
+warnings.filterwarnings("ignore", category=SyntaxWarning)
+
 # ───────────────────────────────────────────────────────────────────────────────
-# 0) Safe built-ins + utility shims  (mirrors tester page)
+# 0) Safe built-ins + utility shims (mirrors tester page)
 ALLOWED_BUILTINS = {
     "len": len, "sum": sum, "any": any, "all": all,
     "set": set, "range": range, "sorted": sorted,
@@ -24,7 +27,7 @@ def ord(x):
     except Exception:
         return 0
 
-# Sanitize leading-zero integers like 08, 009 (but not floats like 0.8)
+# Sanitize leading-zero integers like 08, 009 (not floats like 0.8)
 _leading_zero_int = re.compile(r'(?<![\w])0+(\d+)(?!\s*\.)')
 
 def _sanitize_numeric_literals(code: str) -> str:
@@ -35,7 +38,6 @@ def _eval(code_or_obj, ctx):
     try:
         return eval(code_or_obj, g, ctx)
     except SyntaxError:
-        # Last-resort sanitize at runtime too
         return eval(_sanitize_numeric_literals(code_or_obj), g, ctx)
 
 def sum_category(total: int) -> str:
@@ -62,7 +64,7 @@ mirror = MIRROR
 V_TRAC = V_TRAC_GROUPS
 VTRAC_GROUPS = V_TRAC_GROUPS
 vtrac = V_TRAC_GROUPS
-mirrir = MIRROR  # historical typo seen in some rows
+mirrir = MIRROR  # historical typo
 
 # ───────────────────────────────────────────────────────────────────────────────
 # 1) UI
@@ -84,7 +86,7 @@ with c2:
 with c3:
     chronology = st.radio("History order", ["Earliest→Latest", "Latest→Earliest"], index=0, horizontal=True)
 
-# Optional paste for filters CSV (kept)
+# Optional paste for filters CSV
 csv_text = st.text_area(
     "Or paste filter CSV (15 columns with header)",
     height=180,
@@ -141,25 +143,21 @@ def load_filters_csv(file=None, text: str = "") -> Tuple[List[Dict[str,Any]], Li
         applicable = (row.get('applicable_if') or "True").strip().strip("'").strip('"')
         expr = (row.get('expression') or "False").strip().strip("'").strip('"')
 
-        # [FIX] sanitize BEFORE parsing/compiling to avoid invalid decimal literal
+        # Sanitize BEFORE parsing/compiling to avoid "invalid decimal literal"
         applicable_s = _sanitize_numeric_literals(applicable)
         expr_s = _sanitize_numeric_literals(expr)
 
         enabled = _enabled_value(row.get('enabled',''))
 
         try:
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", SyntaxWarning)  # [FIX] silence noisy warning
-                ast.parse(f"({applicable_s})", mode='eval')
+            ast.parse(f"({applicable_s})", mode='eval')
             app_code = compile(applicable_s, '<app>', 'eval')
         except Exception as e:
             bad.append((fid, name, f"applicable_if parse: {e.__class__.__name__}: {e}", applicable))
             continue
 
         try:
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", SyntaxWarning)  # [FIX] silence noisy warning
-                ast.parse(f"({expr_s})", mode='eval')
+            ast.parse(f"({expr_s})", mode='eval')
             expr_code = compile(expr_s, '<expr>', 'eval')
         except Exception as e:
             bad.append((fid, name, f"expression parse: {e.__class__.__name__}: {e}", expr))
@@ -195,13 +193,13 @@ if raw_hist and chronology == "Latest→Earliest":
 def _winner_triples(arr: List[str]) -> List[Tuple[str,str,str]]:
     triples = []
     for i in range(2, len(arr)):
-        triples.append((arr[i-2], arr[i-1], arr[i]))
+        triples.append((arr[i], arr[i-1], arr[i-2]))  # seed, prev1, prev2
     return triples
 
 triples = _winner_triples(raw_hist)
 
 # ───────────────────────────────────────────────────────────────────────────────
-# 4.5) Input readiness (diagnostic only)
+# 4.5) Input readiness (diagnostic)
 st.caption(
     f"🧩 Input readiness — Filters: **{len(filters_csv)}** | History draws: **{len(raw_hist)}** | Pool size: **{len(pool)}**"
 )
@@ -305,21 +303,14 @@ def filter_fires(row, ctx) -> bool:
 # ───────────────────────────────────────────────────────────────────────────────
 # 8) Per-filter metrics
 metrics = []
-latest_seed = raw_hist[-1]       # newest
+latest_seed = raw_hist[-1]
 prev1 = raw_hist[-2] if len(raw_hist) >= 2 else raw_hist[-1]
 prev2 = raw_hist[-3] if len(raw_hist) >= 3 else raw_hist[-1]
 
-def _winner_triples2(arr: List[str]) -> List[Tuple[str,str,str]]:
-    triples = []
-    for i in range(2, len(arr)):
-        triples.append((arr[i], arr[i-1], arr[i-2]))  # seed, prev1, prev2
-    return triples
-
-triples2 = _winner_triples2(raw_hist)
-
 for r in filters_csv:
     keep = 0; n = 0
-    for seed, p1, pp in triples2:
+    for i in range(2, len(raw_hist)):
+        seed, p1, pp = raw_hist[i], raw_hist[i-1], raw_hist[i-2]
         ctx = gen_ctx_for_combo(seed, p1, pp, seed)
         fired = filter_fires(r, ctx)
         keep += (not fired)
