@@ -1,5 +1,5 @@
 # loserlist_w_filters_builder.py
-# Loser List (Least → Most Likely) — Tester-ready Export (layout preserved)
+# Loser List (Least → Most Likely) — Tester-ready Export (with Heatmaps & Full Loser List restored)
 
 import io
 import re
@@ -16,7 +16,7 @@ DIGITS  = list("0123456789")
 MIRROR  = {0:5, 1:6, 2:7, 3:8, 4:9, 5:0, 6:1, 7:2, 8:3, 9:4}
 
 # -----------------------------
-# Helpers (unchanged UI)
+# Helpers
 # -----------------------------
 def normalize_quotes(text: str) -> str:
     if not text:
@@ -64,21 +64,17 @@ def loser_list(last13: List[str]):
     order_prev, order_curr = heat_order(prev10), heat_order(curr10)
     rank_prev,  rank_curr  = rank_of_digit(order_prev), rank_of_digit(order_curr)
 
-    # digit -> letter maps (A hottest … J coldest)
-    digit_prev_letters  = {d: LETTERS[rank_prev[d]  - 1] for d in DIGITS}
-    digit_curr_letters  = {d: LETTERS[rank_curr[d]  - 1] for d in DIGITS}
+    digit_prev_letters = {d: LETTERS[rank_prev[d]  - 1] for d in DIGITS}
+    digit_curr_letters = {d: LETTERS[rank_curr[d]  - 1] for d in DIGITS}
 
-    # core letters = previous-map letters of MR digits
     most_recent = rows[0]
     core_letters_prevmap = sorted({digit_prev_letters[d] for d in most_recent},
                                   key=lambda L: LETTERS.index(L))
 
-    # ring letters = ±1 neighbors around previous-core letters (letter space)
     ring_letters = set()
     for L in core_letters_prevmap:
         ring_letters.update(neighbors(L, 1))
 
-    # simple ranking (kept for compatibility)
     def tier(d: str) -> int:
         L = digit_curr_letters[d]
         if L in core_letters_prevmap: return 3
@@ -124,7 +120,6 @@ def to_three_cols(df: pd.DataFrame) -> pd.DataFrame:
     cols = set(c.lower() for c in df.columns)
     lower_map = {c.lower(): c for c in df.columns}
 
-    # 3-col path
     if {"name","description","expression"}.issubset(cols) and "id" not in cols:
         out = df[[lower_map["name"], lower_map["description"], lower_map["expression"]]].copy()
         out.columns = ["name","description","expression"]
@@ -132,7 +127,6 @@ def to_three_cols(df: pd.DataFrame) -> pd.DataFrame:
         out = out[out["name"].str.lower() != "name"]
         return out.reset_index(drop=True)
 
-    # 5-col path
     needed = {"id","name","enabled","applicable_if","expression"}
     if needed.issubset(cols):
         out = df[[lower_map["id"], lower_map["name"], lower_map["enabled"],
@@ -172,13 +166,12 @@ def compute_numeric_context(last13: List[str], last20_opt: List[str]) -> Dict:
     digit_current_letters = {d: LETTERS[rank_curr[d] - 1] for d in DIGITS}
     digit_prev_letters    = {d: LETTERS[rank_prev[d]  - 1] for d in DIGITS}
 
-    # NEW: transitions — digits whose prev letter == F|G and current letter == I
+    # transitions
     trans_FI = [d for d in DIGITS
                 if digit_prev_letters.get(d) == 'F' and digit_current_letters.get(d) == 'I']
     trans_GI = [d for d in DIGITS
                 if digit_prev_letters.get(d) == 'G' and digit_current_letters.get(d) == 'I']
 
-    # previous-core letters (mapped from prev-letter map) & ring
     prev_core_letters = sorted({digit_prev_letters[d] for d in seed_digits},
                                key=lambda L: LETTERS.index(L))
     ring_letters = set()
@@ -186,21 +179,16 @@ def compute_numeric_context(last13: List[str], last20_opt: List[str]) -> Dict:
         ring_letters.update(neighbors(L, 1))
     ring_digits = [d for d in DIGITS if digit_current_letters[d] in ring_letters]
 
-    # current-core letters
     curr_core_letters = sorted({digit_current_letters[d] for d in seed_digits},
                                key=lambda L: LETTERS.index(L))
 
-    # digits whose **current** letter is in the **previous** core letters
     prev_core_currentmap_digits = [d for d in DIGITS if digit_current_letters[d] in set(prev_core_letters)]
 
-    # rank changes
     cooled_digits   = [d for d in DIGITS if rank_curr[d] > rank_prev[d]]
     new_core_digits = [d for d in DIGITS if digit_current_letters[d] in set(curr_core_letters)]
 
-    # loser 7–9 (cold end of current order)
     loser_7_9 = order_curr[-3:]
 
-    # hot sets
     hot7_last10 = order_curr[:7]
     hot7_last20: List[str] = []
     if last20_opt and len(last20_opt) >= 20:
@@ -209,31 +197,38 @@ def compute_numeric_context(last13: List[str], last20_opt: List[str]) -> Dict:
             c.setdefault(d, 0)
         hot7_last20 = [d for d, _ in c.most_common(7)]
 
-    # mirrors
     prev_mirror_digits = sorted({str(MIRROR[int(d)]) for d in prev_digits}, key=int)
     seed_mirror_digits = sorted({str(MIRROR[int(d)]) for d in seed_digits}, key=int)
 
-    # union / due (last two draws)
     union_last2 = sorted(set(prev_digits) | set(prev2_digits), key=int)
     due_last2   = sorted(set(DIGITS) - set(prev_digits) - set(prev2_digits), key=int)
 
-    # core-size booleans
     core_size = len(prev_core_letters)
     core_size_flags = {
         "core_size_eq_2":   core_size == 2,
         "core_size_eq_5":   core_size == 5,
         "core_size_in_2_5": core_size in {2,5},
-        "core_size_in_235": core_size in {2,3,5},   # kept for gating variants
+        "core_size_in_235": core_size in {2,3,5},
     }
 
-    # sums
     seed_sum = sum(int(x) for x in seed_digits)
     prev_sum = sum(int(x) for x in prev_digits)
+
+    # loser ranking (for display section)
+    # tier: prev-core > ring > other, then by current rank
+    ring_letters_set = set(ring_digits_from_letters(set(prev_core_letters), digit_current_letters))
+    def tier_for_display(d: str) -> int:
+        L = digit_current_letters[d]
+        if L in prev_core_letters: return 0
+        if d in ring_letters_set:   return 1
+        return 2
+    loser_ranking = sorted(DIGITS, key=lambda d: (tier_for_display(d), rank_curr[d], d))
 
     return dict(
         seed_digits=seed_digits, prev_digits=prev_digits, prev2_digits=prev2_digits,
         seed_sum=seed_sum, prev_sum=prev_sum,
-        digit_current_letters=digit_current_letters, digit_prev_letters=digit_prev_letters,
+        digit_current_letters=digit_current_letters,
+        digit_prev_letters=digit_prev_letters,
         prev_core_letters=prev_core_letters, curr_core_letters=curr_core_letters,
         ring_digits=ring_digits, new_core_digits=new_core_digits, cooled_digits=cooled_digits,
         loser_7_9=loser_7_9, hot7_last10=hot7_last10, hot7_last20=hot7_last20,
@@ -241,21 +236,20 @@ def compute_numeric_context(last13: List[str], last20_opt: List[str]) -> Dict:
         union_last2=union_last2, due_last2=due_last2,
         prev_core_currentmap_digits=prev_core_currentmap_digits,
         core_size_flags=core_size_flags,
-        # NEW: transitions for builder → tester numeric export
-        trans_FI=trans_FI,
-        trans_GI=trans_GI,
+        trans_FI=trans_FI, trans_GI=trans_GI,
+        order_prev=order_prev, order_curr=order_curr,  # for heat maps
+        rank_prev=rank_prev, rank_curr=rank_curr,      # for heat maps
+        loser_ranking=loser_ranking                    # for full list display
     )
 
 # -----------------------------
-# Resolver (no variables left)
+# Resolver (numbers only)
 # -----------------------------
 def resolve_expression(expr: str, ctx: Dict) -> str:
     x = (normalize_quotes(expr or "")).strip()
 
-    # quoted digits → bare ints
     x = re.sub(r"'([0-9])'", r"\1", x)
 
-    # digit_prev/current_letters['8'] == 'F'  or  != 'F'
     def eval_letter_eq(txt: str, which: str, letters_map: Dict[str, str]) -> str:
         pat = re.compile(rf"{which}\s*\[\s*([0-9])\s*\]\s*([=!]=)\s*'([A-J])'")
         def _sub(m):
@@ -264,10 +258,9 @@ def resolve_expression(expr: str, ctx: Dict) -> str:
             return "True" if (ok and op == "==") or ((not ok) and op == "!=") else "False"
         return pat.sub(_sub, txt)
 
-    x = eval_letter_eq(x, "digit_prev_letters",    ctx.get("digit_prev_letters", {}))
-    x = eval_letter_eq(x, "digit_current_letters", ctx.get("digit_current_letters", {}))
+    x = eval_letter_eq(x, "digit_prev_letters",    {})
+    x = eval_letter_eq(x, "digit_current_letters", {})
 
-    # digit_current_letters[var] in ['A','B',...']  --> var in [digit list]
     pat_letters_membership = re.compile(
         r"digit_current_letters\s*\[\s*([A-Za-z_]\w*)\s*\]\s*in\s*\[(.*?)\]"
     )
@@ -280,13 +273,11 @@ def resolve_expression(expr: str, ctx: Dict) -> str:
         return f"{var_d} in {fmt_digits_list(allowed)}"
     x = pat_letters_membership.sub(sub_letter_membership, x)
 
-    # digit_current_letters[var] in prev_core_letters  --> var in prev_core_currentmap_digits
     pat_in_prev_core = re.compile(r"digit_current_letters\s*\[\s*([A-Za-z_]\w*)\s*\]\s*in\s*prev_core_letters")
     if ctx.get("prev_core_currentmap_digits") is not None:
         allowed = fmt_digits_list(ctx["prev_core_currentmap_digits"])
         x = pat_in_prev_core.sub(lambda m: f"{m.group(1)} in {allowed}", x)
 
-    # Replace list vars (supports both “in var” and bare “var”)
     list_vars = {
         "cooled_digits":      ctx["cooled_digits"],
         "new_core_digits":    ctx["new_core_digits"],
@@ -301,7 +292,6 @@ def resolve_expression(expr: str, ctx: Dict) -> str:
         "union_last2":        ctx["union_last2"],
         "due_last2":          ctx["due_last2"],
         "prev_core_currentmap_digits": ctx["prev_core_currentmap_digits"],
-        # NEW: transitions
         "trans_FI":           ctx.get("trans_FI", []),
         "trans_GI":           ctx.get("trans_GI", []),
     }
@@ -310,26 +300,16 @@ def resolve_expression(expr: str, ctx: Dict) -> str:
         x = re.sub(rf"\bin\s+{name}\b", " in " + lit, x)
         x = re.sub(rf"\b{name}\b", lit, x)
 
-    # Replace letter-in-set booleans to True/False
-    def letter_contains(txt: str, varname: str, letters: Set[str]) -> str:
-        p = re.compile(r"'([A-J])'\s+in\s+" + re.escape(varname))
-        return p.sub(lambda mm: "True" if mm.group(1) in letters else "False", txt)
-
-    x = letter_contains(x, "prev_core_letters", set(ctx["prev_core_letters"]))
-    x = letter_contains(x, "core_letters",      set(ctx["curr_core_letters"]))
-
-    # Scalar sums
     x = re.sub(r"\bseed_sum\b", str(ctx.get("seed_sum", 0)), x)
     x = re.sub(r"\bprev_sum\b", str(ctx.get("prev_sum", 0)), x)
 
-    # Core-size boolean symbols → True/False
     for key, val in (ctx.get("core_size_flags") or {}).items():
         x = re.sub(rf"\b{re.escape(key)}\b", "True" if val else "False", x)
 
     return x
 
 def build_tester_csv_from_paste(pasted_text: str, ctx: Dict) -> pd.DataFrame:
-    df3 = to_three_cols(_read_csv_loose(pasted_text))
+    df3 = to_three_cols(pd.read_csv(io.StringIO(pasted_text)) if False else _read_csv_loose(pasted_text))
     resolved_expr = [resolve_expression(expr=r["expression"], ctx=ctx) for _, r in df3.iterrows()]
     out = pd.DataFrame({
         "id":            df3["name"].astype(str),
@@ -343,7 +323,7 @@ def build_tester_csv_from_paste(pasted_text: str, ctx: Dict) -> pd.DataFrame:
     return out
 
 # -----------------------------
-# UI (kept as in your file)
+# UI
 # -----------------------------
 st.title("Loser List (Least → Most Likely) — Tester-ready Export")
 
@@ -366,63 +346,9 @@ with st.form("winners_form"):
                                  help="Needed only for *Last-20 Hot* filters.")
     compute = st.form_submit_button("Compute")
 
-def render_context_panels(info: Dict, last13: List[str], last20_opt: List[str]):
-    seed_digits = list(last13[0]) if last13 else []
-    prev_digits = list(last13[1]) if len(last13) > 1 else []
-
-    prev_mirror_digits = [str(MIRROR[int(d)]) for d in prev_digits] if prev_digits else []
-
-    core_letters_prevmap = info["core_letters_prevmap"]
-    ring_letters = set()
-    for L in core_letters_prevmap:
-        ring_letters.update(neighbors(L, 1))
-    ring_digits = ring_digits_from_letters(ring_letters, info["digit_current_letters"])
-
-    cooled_digits   = [d for d in DIGITS if info["rank_curr_map"][d] > info["rank_prev_map"][d]]
-    new_core_digits = [d for d in DIGITS if info["digit_current_letters"][d] not in core_letters_prevmap]
-
-    loser_ranking = sorted(
-        DIGITS,
-        key=lambda d: (
-            0 if info["digit_current_letters"][d] in core_letters_prevmap else
-            1 if info["digit_current_letters"][d] in ring_letters else
-            2,
-            info["rank_curr_map"][d]
-        )
-    )
-    loser_7_9 = loser_ranking[7:10]
-
-    order_curr_str = info.get("current_map_order", "0123456789")
-    hot7_last10    = list(order_curr_str[:7])
-
-    hot7_last20 = []
-    if last20_opt and len(last20_opt) >= 20:
-        c = Counter(d for s in last20_opt[:20] for d in s)
-        for d in DIGITS:
-            c.setdefault(d, 0)
-        hot7_last20 = [d for d, _ in c.most_common(7)]
-
-    core_size = len({info["digit_prev_letters"][d] for d in seed_digits}) if seed_digits else 0
-    core_size_flags = {
-        "core_size_eq_2": core_size == 2,
-        "core_size_eq_5": core_size == 5,
-        "core_size_in_2_5": core_size in {2,5},
-        "core_size_in_235": core_size in {2,3,5},
-    }
-
-    # session for reuse
-    st.session_state.update({
-        "seed_digits": seed_digits,
-        "prev_digits": prev_digits,
-        "prev_mirror_digits": prev_mirror_digits,
-        "loser_7_9": loser_7_9,
-        "ring_digits": ring_digits,
-        "new_core_digits": new_core_digits,
-        "cooled_digits": cooled_digits,
-        "hot7_last10": hot7_last10,
-        "hot7_last20": hot7_last20,
-        "core_size_flags": core_size_flags,
-    })
+def render_context_panels(ctx: Dict, last13: List[str], last20_opt: List[str]):
+    seed_digits = ctx["seed_digits"]
+    prev_digits = ctx["prev_digits"]
 
     st.subheader("Resolved variables (this run)")
     c1, c2, c3, c4 = st.columns(4)
@@ -432,22 +358,42 @@ def render_context_panels(info: Dict, last13: List[str], last20_opt: List[str]):
         st.markdown("**prev_digits**")
         st.code(", ".join(prev_digits) or "∅")
         st.markdown("**prev_mirror_digits**")
-        st.code(", ".join(prev_mirror_digits) or "∅")
+        st.code(", ".join(ctx["prev_mirror_digits"]) or "∅")
     with c2:
         st.markdown("**loser_7_9**")
-        st.code(", ".join(loser_7_9) or "∅")
+        st.code(", ".join(ctx["loser_7_9"]) or "∅")
         st.markdown("**ring_digits**")
-        st.code(", ".join(ring_digits) or "∅")
+        st.code(", ".join(ctx["ring_digits"]) or "∅")
     with c3:
         st.markdown("**new_core_digits**")
-        st.code(", ".join(new_core_digits) or "∅")
+        st.code(", ".join(ctx["new_core_digits"]) or "∅")
         st.markdown("**cooled_digits**")
-        st.code(", ".join(cooled_digits) or "∅")
+        st.code(", ".join(ctx["cooled_digits"]) or "∅")
     with c4:
         st.markdown("**hot7_last10**")
-        st.code(", ".join(hot7_last10) or "∅")
+        st.code(", ".join(ctx["hot7_last10"]) or "∅")
         st.markdown("**hot7_last20**")
-        st.code(", ".join(hot7_last20) or "∅")
+        st.code(", ".join(ctx["hot7_last20"]) or "∅")
+
+    # 🔥 Full Heat Maps
+    st.markdown("---")
+    st.subheader("Heat maps (Prev ↔ Current) + Transitions")
+    df_heat = pd.DataFrame({
+        "digit": DIGITS,
+        "prev_letter": [ctx["digit_prev_letters"][d]   for d in DIGITS],
+        "prev_rank":   [ctx["rank_prev"][d]            for d in DIGITS],
+        "curr_letter": [ctx["digit_current_letters"][d] for d in DIGITS],
+        "curr_rank":   [ctx["rank_curr"][d]            for d in DIGITS],
+    })
+    st.dataframe(df_heat, use_container_width=True, height=280)
+
+    st.caption(f"trans_FI (prev F → curr I): {', '.join(ctx['trans_FI']) or '∅'}")
+    st.caption(f"trans_GI (prev G → curr I): {', '.join(ctx['trans_GI']) or '∅'}")
+
+    # 📃 Full Loser List (ordered view)
+    st.markdown("---")
+    st.subheader("Full Loser List (ordered view)")
+    st.code(", ".join(ctx["loser_ranking"]), language="text")
 
 if compute:
     try:
@@ -456,18 +402,19 @@ if compute:
             st.error("Please provide at least 13 winners (MR→Oldest).")
         else:
             ranking, info = loser_list(last13)
-            st.session_state["info"] = info
-            st.session_state["last13"] = last13
             last20_opt = parse_winners_text(st.session_state.get("winners20_text",""),
                                             pad4=st.session_state.get("pad4", True)) if st.session_state.get("winners20_text","").strip() else []
-            st.session_state["last20"] = last20_opt
-            render_context_panels(info, last13, last20_opt)
+            ctx = compute_numeric_context(last13, last20_opt)
+
+            st.session_state.update({"info": info, "last13": last13, "last20": last20_opt, "ctx": ctx})
+            render_context_panels(ctx, last13, last20_opt)
     except Exception as e:
         st.error(str(e))
 
-# Re-render if already computed
-if "info" in st.session_state and "last13" in st.session_state:
-    render_context_panels(st.session_state["info"], st.session_state["last13"], st.session_state.get("last20", []))
+if "ctx" in st.session_state and "last13" in st.session_state:
+    ctx = st.session_state["ctx"]
+    last13 = st.session_state["last13"]
+    last20 = st.session_state.get("last20", [])
 
     st.markdown("---")
     st.markdown("### Paste Filters (3-col or 5-col)")
@@ -482,15 +429,7 @@ if "info" in st.session_state and "last13" in st.session_state:
 
     if build:
         try:
-            last13 = st.session_state["last13"]
-            last20 = st.session_state.get("last20", [])
-            ctx = compute_numeric_context(last13, last20)
-
-            tester_df = build_tester_csv_from_paste(
-                pasted_text=mega_csv,
-                ctx=ctx,
-            )
-
+            tester_df = build_tester_csv_from_paste(mega_csv, ctx)
             st.markdown("### Tester-ready CSV (copy/paste)")
             csv_text = tester_df.to_csv(index=False)
             st.code(csv_text, language="csv")
