@@ -1,67 +1,13 @@
-# filter_picker_pro.py  — unchanged app + key diagnostics
-
-import io, csv, ast, math, re, textwrap, inspect
+# file: filter_picker_pro.py
+import io, csv, ast, math, re, textwrap
 from collections import Counter, defaultdict
 from typing import List, Dict, Any, Tuple
+import numpy as np
 import streamlit as st
 import pandas as pd
-import numpy as np
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Key diagnostics (passive, zero behavior change)
-# ───────────────────────────────────────────────────────────────────────────────
-_KEY_LOG = []  # (widget, key, file, line)
-
-def _wrap_widget(name, fn):
-    def inner(*args, **kwargs):
-        key = kwargs.get("key", None)
-        if key is not None:
-            # capture caller outside streamlit internals
-            stack = [f for f in inspect.stack()[1:] if "/site-packages/streamlit" not in (f.filename or "")]
-            src_file = stack[0].filename if stack else "?"
-            src_line = stack[0].lineno if stack else 0
-            _KEY_LOG.append((name, str(key), src_file, int(src_line)))
-        return fn(*args, **kwargs)
-    return inner
-
-def _enable_key_diagnostics():
-    if getattr(st, "_keys_patched", False):
-        return
-    widgets = [
-        "checkbox","text_input","number_input","text_area","radio","selectbox",
-        "multiselect","slider","file_uploader","button","download_button",
-        "date_input","time_input","color_picker","toggle"
-    ]
-    for w in widgets:
-        if hasattr(st, w):
-            setattr(st, f"_orig_{w}", getattr(st, w))
-            setattr(st, w, _wrap_widget(w, getattr(st, f"_orig_{w}")))
-    st._keys_patched = True
-
-def _render_key_diagnostics():
-    from collections import defaultdict
-    counts = defaultdict(int)
-    first = {}
-    for w, k, f, ln in _KEY_LOG:
-        counts[k] += 1
-        first.setdefault(k, (w, f, ln))
-    dups = [(k, counts[k], *first[k]) for k in counts if counts[k] > 1]
-    with st.expander("🔎 Diagnostics: Streamlit key usage (live)", expanded=False):
-        st.caption("Shows any duplicated keys registered this run. Empty list = all good.")
-        st.write(f"Total widget registrations: {len(_KEY_LOG)} — Unique keys: {len(counts)}")
-        if not dups:
-            st.success("No duplicate keys detected.")
-        else:
-            st.error("Duplicate keys found:")
-            df = pd.DataFrame(dups, columns=["key","count","first_widget","first_file","first_line"])
-            st.dataframe(df, use_container_width=True, height=260)
-            st.code("\n".join(f"{k}  ×{c}  first: {w} @ {f}:{ln}" for k,c,w,f,ln in dups), language="text")
-
-_enable_key_diagnostics()
-
-# ───────────────────────────────────────────────────────────────────────────────
-# Safe built-ins + helpers (leave as in your app)
-# ───────────────────────────────────────────────────────────────────────────────
+# 0) Safe built-ins + utility shims  (mirrors tester page)
 ALLOWED_BUILTINS = {
     "len": len, "sum": sum, "any": any, "all": all,
     "set": set, "range": range, "sorted": sorted,
@@ -72,12 +18,14 @@ ALLOWED_BUILTINS = {
     "Counter": Counter, "math": math,
 }
 
+# ord shim (some CSVs call ord() on non-chars; keep from crashing)
 def ord(x):
     try:
         return __builtins__.ord(x)
     except Exception:
         return 0
 
+# legacy 08/09 literal sanitizer, used if an expression fails to eval because of 08, 09, etc.
 _leading_zero_int = re.compile(r'(?<![\w])0+(\d+)(?!\s*\.)')
 def _sanitize_numeric_literals(code_or_obj):
     if isinstance(code_or_obj, str):
@@ -91,6 +39,7 @@ def _eval(code_or_obj, ctx):
     except SyntaxError:
         return eval(_sanitize_numeric_literals(code_or_obj), g, ctx)
 
+# Sum category + structure helpers (used by CSV)
 def sum_category(total: int) -> str:
     if 0 <= total <= 14:  return 'Very Low'
     if 15 <= total <= 20: return 'Low'
@@ -108,18 +57,18 @@ def structure_of(digits: List[int]) -> str:
     if c == [5]:         return 'QUINT'
     return f'OTHER-{c}'
 
+# V-TRAC & mirror maps + aliases used in CSV expressions
 V_TRAC_GROUPS = {0:1,5:1,1:2,6:2,2:3,7:3,3:4,8:4,4:5,9:5}
 MIRROR_PAIRS = {0:5,5:0,1:6,6:1,2:7,7:2,3:8,8:3,4:9,9:4}
 MIRROR = MIRROR_PAIRS
-mirror = MIRROR
+mirror = MIRROR  # many rows call mirror.get(d, -1)
 V_TRAC = V_TRAC_GROUPS
 VTRAC_GROUPS = V_TRAC_GROUPS
 vtrac = V_TRAC_GROUPS
-mirrir = MIRROR
+mirrir = MIRROR  # common historical typo
 
 # ───────────────────────────────────────────────────────────────────────────────
-# UI (kept the same)
-# ───────────────────────────────────────────────────────────────────────────────
+# 1) UI
 st.set_page_config(page_title="Filter Picker — Universal CSV", layout="wide")
 st.title("Filter Picker (Hybrid I/O) — Universal CSV")
 
@@ -138,6 +87,9 @@ with c2:
 with c3:
     chronology = st.radio("History order", ["Earliest→Latest", "Latest→Earliest"], index=0, horizontal=True)
 
+# NEW: optional paste for filters CSV (adds ability to paste instead of upload)
+csv_text = st.text_area("Or paste filter CSV (15 columns with header)", height=180, placeholder="id,name,enabled,applicable_if,expression,Unnamed: 5,...,Unnamed: 14\n...")
+
 ids_text = st.text_input("Optional: paste applicable filter IDs (comma/space separated). Leave blank to consider all compiled rows.")
 
 cA, cB, cC = st.columns([1,1,1])
@@ -151,8 +103,7 @@ with cC:
 run_btn = st.button("Compute / Rebuild", type="primary", use_container_width=True)
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Pool parsing (same)
-# ───────────────────────────────────────────────────────────────────────────────
+# 2) Parse pool
 def _norm_pool(text: str) -> List[str]:
     if not text: return []
     raw = text.replace("\r"," ").replace("\n", ",")
@@ -167,16 +118,25 @@ def _norm_pool(text: str) -> List[str]:
 pool = _norm_pool(pool_text)
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Load CSV (same)
-# ───────────────────────────────────────────────────────────────────────────────
+# 3) Load universal filter CSV (same as tester)  — now supports upload OR paste
 def _enabled_value(val: str) -> bool:
     s = (val or "").strip().lower()
     return s in {'"""true"""','"true"','true','1','yes','y'}
 
-def load_filters_csv(file) -> Tuple[List[Dict[str,Any]], List[Tuple[str,str,str,str]]]:
-    if not file: return [], []
-    data = file.read().decode("utf-8", errors="ignore")
-    file.seek(0)
+def load_filters_csv(file=None, text: str = "") -> Tuple[List[Dict[str,Any]], List[Tuple[str,str,str,str]]]:
+    """
+    Returns (rows, syntactic_skips).
+    Each row: {id,name,enabled,app_code,expr_code,raw_app,raw_expr}
+    Syntactic skips: (id,name,reason,text_that_failed)
+    """
+    if text.strip():
+        data = text
+    elif file:
+        data = file.read().decode("utf-8", errors="ignore")
+        file.seek(0)
+    else:
+        return [], []
+
     reader = csv.DictReader(io.StringIO(data))
     out, bad = [], []
     for raw in reader:
@@ -187,6 +147,7 @@ def load_filters_csv(file) -> Tuple[List[Dict[str,Any]], List[Tuple[str,str,str,
         expr = (row.get('expression') or "False").strip().strip("'").strip('"')
         enabled = _enabled_value(row.get('enabled',''))
 
+        # Only **syntax** check and store compiled objects. Do **not** execute here.
         try:
             ast.parse(f"({applicable})", mode='eval'); app_code = compile(applicable, '<app>', 'eval')
         except Exception as e:
@@ -204,21 +165,24 @@ def load_filters_csv(file) -> Tuple[List[Dict[str,Any]], List[Tuple[str,str,str,
                     "raw_app":applicable, "raw_expr":expr})
     return out, bad
 
-filters_csv, syntactic_skips = load_filters_csv(filt_file)
+# use paste first if provided, else uploaded file (previous behavior preserved)
+filters_csv, syntactic_skips = load_filters_csv(filt_file, csv_text)
 
+# If IDs pasted, restrict to those
 applicable_ids = set()
 if ids_text.strip():
     applicable_ids = {t.strip().upper() for t in re.split(r"[,\s]+", ids_text) if t.strip()}
+
 if applicable_ids:
     filters_csv = [r for r in filters_csv if r["id"].upper() in applicable_ids]
 
 # ───────────────────────────────────────────────────────────────────────────────
-# History + triples (same)
-# ───────────────────────────────────────────────────────────────────────────────
+# 4) Parse history + build winner triples
 def _read_history(file) -> List[str]:
     if not file: return []
     body = file.read().decode("utf-8", errors="ignore")
     file.seek(0)
+    # csv or txt: scan all 5-digit tokens
     digs = re.findall(r"\b\d{5}\b", body)
     return digs
 
@@ -235,8 +199,7 @@ def _winner_triples(arr: List[str]) -> List[Tuple[str,str,str]]:
 triples = _winner_triples(raw_hist)
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Context + runtime eval (same)
-# ───────────────────────────────────────────────────────────────────────────────
+# 5) Context generator – mirrors tester page names
 def gen_ctx_for_combo(seed:str, prev:str, prev2:str, combo:str,
                       hot=None, cold=None, due=None):
     seed_digits = [int(x) for x in seed]
@@ -254,7 +217,7 @@ def gen_ctx_for_combo(seed:str, prev:str, prev2:str, combo:str,
     combo_sum = sum(cdigits)
     combo_vtracs = set(V_TRAC_GROUPS[d] for d in cdigits)
 
-    return {
+    ctx = {
         "seed_value": seed_value,
         "seed_sum": seed_sum,
         "seed_sum_last_digit": seed_sum % 10,
@@ -280,16 +243,42 @@ def gen_ctx_for_combo(seed:str, prev:str, prev2:str, combo:str,
         "MIRROR": MIRROR, "mirror": MIRROR, "mirrir": MIRROR,
         "MIRROR_PAIRS": MIRROR_PAIRS,
         "V_TRAC_GROUPS": V_TRAC_GROUPS, "VTRAC_GROUPS": V_TRAC_GROUPS,
-        "V_TRAC": V_TRAC_GROUPS, "vtrac": V_TRAC_GROUPS,
+        "V_TRAC": V_TRAC_GROUPS, "VTRAC_GROUP": V_TRAC_GROUPS, "vtrac": V_TRAC_GROUPS,
 
         "sum_category": sum_category, "structure_of": structure_of,
         "Counter": Counter,
 
+        # **Defaults** so filters that reference these never crash
         "hot_digits": list(hot) if hot is not None else [],
         "cold_digits": list(cold) if cold is not None else [],
         "due_digits": list(due) if due is not None else [],
     }
+    return ctx
 
+# ───────────────────────────────────────────────────────────────────────────────
+# 6) Report true compile status (syntax only) + give copy/download of skips
+st.subheader("ID Status (requested list)")
+req = len(applicable_ids) if applicable_ids else len(filters_csv)
+st.caption(f"Compiled (syntax OK): {len(filters_csv)} | Skipped (syntax errors): {len(syntactic_skips)}.")
+
+with st.expander("Skipped rows (reason + expression)", expanded=False):
+    if syntactic_skips:
+        df_skip = pd.DataFrame(syntactic_skips, columns=["id","name","reason","expr"])
+        st.dataframe(df_skip, use_container_width=True, height=360)
+        bad_ids = ", ".join(x[0] for x in syntactic_skips if x[0])
+        st.code(bad_ids, language="text")
+        st.download_button("Download skipped IDs (.txt)", bad_ids.encode("utf-8"),
+                           file_name="skipped_ids.txt")
+    else:
+        st.write("No syntax errors.")
+
+# If nothing to do, stop here
+if not (filters_csv and triples and pool):
+    st.info("Load CSV (upload or paste) + history + pool (and optionally paste applicable IDs), then click Compute / Rebuild.")
+    st.stop()
+
+# ───────────────────────────────────────────────────────────────────────────────
+# 7) Runtime evaluation helpers
 def wilson_ci(k, n, z=1.96):
     if n==0: return (0.0, 0.0, 0.0)
     p = k/n
@@ -304,25 +293,17 @@ def filter_fires(row, ctx) -> bool:
             return False
         return bool(_eval(row["expr_code"], ctx))
     except Exception:
+        # At runtime we still guard; if anything explodes, treat as NOT firing.
         return False
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Metrics + bundle (same)
-# ───────────────────────────────────────────────────────────────────────────────
-st.subheader("ID Status (requested list)")
-req = len(applicable_ids) if applicable_ids else len(filters_csv)
-st.caption(f"Compiled (syntax OK): {len(filters_csv)} | Skipped (syntax errors): {len([])}.")
-
-if not (filters_csv and triples and pool):
-    st.info("Load CSV + history + pool (and optionally paste applicable IDs), then click Compute / Rebuild.")
-    _render_key_diagnostics()
-    st.stop()
-
+# 8) Per-filter metrics
 metrics = []
 latest_seed = triples[-1][2]
 prev1 = triples[-1][1]
 prev2 = triples[-1][0]
 
+# history (keep%), pool (elim%), WPP
 for r in filters_csv:
     keep = 0; n = 0
     for pp, p1, seed in triples:
@@ -347,6 +328,7 @@ for r in filters_csv:
         "elim%": elim_rate, "wpp": wpp, "row": r
     })
 
+# Table
 st.subheader("Per-filter metrics")
 df = pd.DataFrame(metrics).sort_values(["wpp","keep_lb","elim%"], ascending=[False,False,False])
 fmt = df.copy()
@@ -354,6 +336,8 @@ for col in ["keep%","keep_lb","keep_ub","elim%","wpp"]:
     fmt[col] = (fmt[col]*100).round(2)
 st.dataframe(fmt[["id","name","keep%","keep_lb","keep_ub","elim%","wpp"]], use_container_width=True, height=420)
 
+# ───────────────────────────────────────────────────────────────────────────────
+# 9) Greedy bundle
 def apply_filters_bundle(rows: List[Dict[str,Any]], pool: List[str],
                          latest_seed: str, prev1: str, prev2: str) -> Tuple[int, List[str]]:
     survivors = []
@@ -373,7 +357,7 @@ def bundle_keep_est(selected) -> float:
         prod_elim *= (1.0 - m["keep%"])
     return 1.0 - prod_elim
 
-# Precompute pool firing sets (redundancy penalty)
+# Precompute pool firing sets to penalize redundancy
 pool_fires: Dict[str,set] = {}
 for m in metrics:
     fired = set()
@@ -427,7 +411,7 @@ if selected:
     st.write(f"Projected winner survival (product model): {bundle_keep_est(selected):.2%}")
     st.write(f"Projected survivors (pool): {final_n}")
 else:
-    st.info("No bundle found that satisfies the minimum survival. Adjust thresholds or add history.")
+    st.info("No bundle found that satisfies the minimum survival. Lower the threshold or add history.")
 
 colL, colR = st.columns(2)
 with colL:
@@ -443,6 +427,3 @@ with colR:
 
 with st.expander("Survivors (preview)"):
     st.code(", ".join(final_survivors), language="text")
-
-# Always render diagnostics at the end
-_render_key_diagnostics()
