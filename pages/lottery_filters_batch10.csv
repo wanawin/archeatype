@@ -738,7 +738,6 @@ New726,eliminate combos that have 0, True,True,(0 in [int(x) for x in combo_digi
 NEW727,eliminate combos that have 2,True,(2 in [int(x) for x in combo_digits]),,,,,,,,,,,
 NEWF728,Eliminate IF combo has no 7," ""True""",7 not in combo_digits,,,,,,,,,,,
 731,"Eliminate if ≥4 prime digits (2,3,5,7)",True,True,"sum(1 for d in combo_digits if d in {2,3,5,7}) >= 4",,,,,,,,,,
-id,name,enabled,applicable_if,expression,Unnamed: 5,Unnamed: 6,Unnamed: 7,Unnamed: 8,Unnamed: 9,Unnamed: 10,Unnamed: 11,Unnamed: 12,Unnamed: 13,Unnamed: 14
 CF1,ELIMINATE if combo has ≥3 edge digits (A–C or H–J) when seed is fully in that edge,TRUE,,"(((not (False) and not (False) and not (False) and not (True) and not (False) and not (True) and not (True)) and (sum(1 for d in combo_digits if d in [0,6,7]) >= 3)) or ((not (False) and not (False) and not (True) and not (False) and not (False) and not (False) and not (True)) and (sum(1 for d in combo_digits if d in [1,4,5]) >= 3)))",,,,,,,,,,
 CF2,ELIMINATE if unique-digit count == 3 (exactly three distinct digits),TRUE,,len(set(combo_digits)) == 3,,,,,,,,,,
 CF3,"ELIMINATE if combo has ≥4 of [3,4,5,6]",TRUE,,"sum(1 for d in combo_digits if d  in [3,4,5,6]) >= 4",,,,,,,,,,
