@@ -1,5 +1,5 @@
 # file: filter_picker_pro.py
-import io, csv, ast, math, re, textwrap
+import io, csv, ast, math, re, textwrap, warnings  # [FIX] warnings added
 from collections import Counter, defaultdict
 from typing import List, Dict, Any, Tuple
 import numpy as np
@@ -24,17 +24,18 @@ def ord(x):
     except Exception:
         return 0
 
+# Sanitize leading-zero integers like 08, 009 (but not floats like 0.8)
 _leading_zero_int = re.compile(r'(?<![\w])0+(\d+)(?!\s*\.)')
-def _sanitize_numeric_literals(code_or_obj):
-    if isinstance(code_or_obj, str):
-        return _leading_zero_int.sub(r"\1", code_or_obj)
-    return code_or_obj
+
+def _sanitize_numeric_literals(code: str) -> str:
+    return _leading_zero_int.sub(r"\1", code or "")
 
 def _eval(code_or_obj, ctx):
     g = {"__builtins__": ALLOWED_BUILTINS}
     try:
         return eval(code_or_obj, g, ctx)
     except SyntaxError:
+        # Last-resort sanitize at runtime too
         return eval(_sanitize_numeric_literals(code_or_obj), g, ctx)
 
 def sum_category(total: int) -> str:
@@ -83,7 +84,7 @@ with c2:
 with c3:
     chronology = st.radio("History order", ["Earliest→Latest", "Latest→Earliest"], index=0, horizontal=True)
 
-# NEW: optional paste for filters CSV (added feature)
+# Optional paste for filters CSV (kept)
 csv_text = st.text_area(
     "Or paste filter CSV (15 columns with header)",
     height=180,
@@ -139,20 +140,34 @@ def load_filters_csv(file=None, text: str = "") -> Tuple[List[Dict[str,Any]], Li
         name = (row.get('name') or "").strip()
         applicable = (row.get('applicable_if') or "True").strip().strip("'").strip('"')
         expr = (row.get('expression') or "False").strip().strip("'").strip('"')
+
+        # [FIX] sanitize BEFORE parsing/compiling to avoid invalid decimal literal
+        applicable_s = _sanitize_numeric_literals(applicable)
+        expr_s = _sanitize_numeric_literals(expr)
+
         enabled = _enabled_value(row.get('enabled',''))
+
         try:
-            ast.parse(f"({applicable})", mode='eval'); app_code = compile(applicable, '<app>', 'eval')
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", SyntaxWarning)  # [FIX] silence noisy warning
+                ast.parse(f"({applicable_s})", mode='eval')
+            app_code = compile(applicable_s, '<app>', 'eval')
         except Exception as e:
             bad.append((fid, name, f"applicable_if parse: {e.__class__.__name__}: {e}", applicable))
             continue
+
         try:
-            ast.parse(f"({expr})", mode='eval'); expr_code = compile(expr, '<expr>', 'eval')
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", SyntaxWarning)  # [FIX] silence noisy warning
+                ast.parse(f"({expr_s})", mode='eval')
+            expr_code = compile(expr_s, '<expr>', 'eval')
         except Exception as e:
             bad.append((fid, name, f"expression parse: {e.__class__.__name__}: {e}", expr))
             continue
+
         out.append({"id":fid, "name":name, "enabled":enabled,
                     "app_code":app_code, "expr_code":expr_code,
-                    "raw_app":applicable, "raw_expr":expr})
+                    "raw_app":applicable_s, "raw_expr":expr_s})
     return out, bad
 
 filters_csv, syntactic_skips = load_filters_csv(filt_file, csv_text)
@@ -186,7 +201,7 @@ def _winner_triples(arr: List[str]) -> List[Tuple[str,str,str]]:
 triples = _winner_triples(raw_hist)
 
 # ───────────────────────────────────────────────────────────────────────────────
-# 4.5) Input readiness (NEW – diagnostic only; no behavior change)
+# 4.5) Input readiness (diagnostic only)
 st.caption(
     f"🧩 Input readiness — Filters: **{len(filters_csv)}** | History draws: **{len(raw_hist)}** | Pool size: **{len(pool)}**"
 )
@@ -294,15 +309,13 @@ latest_seed = raw_hist[-1]       # newest
 prev1 = raw_hist[-2] if len(raw_hist) >= 2 else raw_hist[-1]
 prev2 = raw_hist[-3] if len(raw_hist) >= 3 else raw_hist[-1]
 
-# history (keep%), pool (elim%), WPP
-# Build (seed, prev1, prev2) triples from raw_hist
-def _winner_triples(arr: List[str]) -> List[Tuple[str,str,str]]:
+def _winner_triples2(arr: List[str]) -> List[Tuple[str,str,str]]:
     triples = []
     for i in range(2, len(arr)):
         triples.append((arr[i], arr[i-1], arr[i-2]))  # seed, prev1, prev2
     return triples
 
-triples2 = _winner_triples(raw_hist)
+triples2 = _winner_triples2(raw_hist)
 
 for r in filters_csv:
     keep = 0; n = 0
