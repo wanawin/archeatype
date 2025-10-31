@@ -821,4 +821,4 @@ CF14,Eliminate if any J-letter digit present,TRUE,,sum(1 for d in combo_digits i
 CF6,Prev-J gated rule active this run (True⇒apply limit; False⇒no-op),TRUE,,False,,,,,,,,,,
 LL48,If prev heatmap F→I,TRUE,,(digit_prev_letters[8] == 'F') and (digit_current_letters[8] == 'I'),,,,,,,,,,
 LL49,If prev heatmap G→I,TRUE,,(digit_prev_letters[8] == 'G') and (digit_current_letters[8] == 'I'),,,,,,,,,,
-FH5,Eliminate if <3 digits from Hot-7 (last 20),TRUE,,sum(1 for d in combo_digits if d in hot7_last20) < 3,,,,,,,,,,
+FH5,Eliminate if <3 digits from Hot-7 (last 20),TRUE,,"sum(1 for d in combo_digits if d in [7,0,9,8,4,3,6]) < 3",,,,,,,,,,
