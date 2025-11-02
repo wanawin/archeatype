@@ -6,7 +6,7 @@ import numpy as np
 import streamlit as st
 import pandas as pd
 
-# Silence noisy "invalid decimal literal" warnings globally
+# Quiet noisy literal warnings
 warnings.filterwarnings("ignore", category=SyntaxWarning)
 
 # ───────────────────────────────────────────────────────────────────────────────
@@ -20,7 +20,6 @@ ALLOWED_BUILTINS = {
     "zip": zip, "map": map, "enumerate": enumerate,
     "Counter": Counter, "math": math,
 }
-
 def ord(x):
     try:
         return __builtins__.ord(x)
@@ -29,7 +28,6 @@ def ord(x):
 
 # Sanitize leading-zero integers like 08, 009 (not floats like 0.8)
 _leading_zero_int = re.compile(r'(?<![\w])0+(\d+)(?!\s*\.)')
-
 def _sanitize_numeric_literals(code: str) -> str:
     return _leading_zero_int.sub(r"\1", code or "")
 
@@ -41,6 +39,7 @@ def _eval(code_or_obj, ctx):
         return eval(_sanitize_numeric_literals(code_or_obj), g, ctx)
 
 def sum_category(total: int) -> str:
+    # (Keep your preferred bands here; unchanged from prior app)
     if 0 <= total <= 14:  return 'Very Low'
     if 15 <= total <= 20: return 'Low'
     if 21 <= total <= 26: return 'Mid'
@@ -117,7 +116,6 @@ def _norm_pool(text: str) -> List[str]:
         s = "".join(ch for ch in t if ch.isdigit())
         if len(s)==5: out.append(s)
     return sorted(set(out))
-
 pool = _norm_pool(pool_text)
 
 # ───────────────────────────────────────────────────────────────────────────────
@@ -193,7 +191,8 @@ if raw_hist and chronology == "Latest→Earliest":
 def _winner_triples(arr: List[str]) -> List[Tuple[str,str,str]]:
     triples = []
     for i in range(2, len(arr)):
-        triples.append((arr[i], arr[i-1], arr[i-2]))  # seed, prev1, prev2
+        # (seed, prev1, prev2) aligned to "next winner" context
+        triples.append((arr[i], arr[i-1], arr[i-2]))
     return triples
 
 triples = _winner_triples(raw_hist)
@@ -212,7 +211,7 @@ if not filters_csv or not raw_hist or not pool:
     st.stop()
 
 # ───────────────────────────────────────────────────────────────────────────────
-# 5) Context generator – mirrors tester page names
+# 5) Context + similarity profiles
 def gen_ctx_for_combo(seed:str, prev:str, prev2:str, combo:str,
                       hot=None, cold=None, due=None):
     seed_digits = [int(x) for x in seed]
@@ -267,6 +266,62 @@ def gen_ctx_for_combo(seed:str, prev:str, prev2:str, combo:str,
     }
     return ctx
 
+def carry_bucket(seed_digits: List[int], prev_digits: List[int]) -> str:
+    shared = len(set(seed_digits) & set(prev_digits))
+    if shared == 0: return "C0"
+    if shared == 1: return "C1"
+    return "C2plus"
+
+def profile_triple(seed: str, prev1: str) -> Tuple[str,str,str]:
+    sd = [int(x) for x in seed]
+    pd = [int(x) for x in prev1] if prev1 else []
+    return (
+        sum_category(sum(sd)),
+        structure_of(sd),
+        carry_bucket(sd, pd),
+    )
+
+# Current (latest) profile
+latest_seed = raw_hist[-1]
+prev1 = raw_hist[-2] if len(raw_hist) >= 2 else raw_hist[-1]
+prev2 = raw_hist[-3] if len(raw_hist) >= 3 else raw_hist[-1]
+current_profile = profile_triple(latest_seed, prev1)
+
+# Build similarity indices with relaxor
+def similar_indices(min_samples: int = 25) -> Tuple[List[int], Tuple[str,...]]:
+    # Build all profiles
+    profs = []
+    for i in range(2, len(raw_hist)):
+        seed, p1 = raw_hist[i], raw_hist[i-1]
+        profs.append((i, profile_triple(seed, p1)))
+
+    keys_all = ("sumcat", "struct", "carry")
+    cur_sumcat, cur_struct, cur_carry = current_profile
+
+    def match(p, keys):
+        sc, stc, car = p
+        ok = True
+        if "sumcat" in keys: ok &= (sc == cur_sumcat)
+        if "struct" in keys: ok &= (stc == cur_struct)
+        if "carry"  in keys: ok &= (car == cur_carry)
+        return ok
+
+    # Try 3→2→1 keys until we have enough samples
+    for use_keys in [
+        ("sumcat","struct","carry"),
+        ("sumcat","struct"),
+        ("sumcat","carry"),
+        ("struct","carry"),
+        ("sumcat",),
+    ]:
+        idx = [i for (i, p) in profs if match(p, use_keys)]
+        if len(idx) >= min_samples:
+            return idx, use_keys
+    # Fall back to everything if still small
+    return [i for (i, _) in profs], tuple()
+
+sim_idx, used_keys = similar_indices(min_samples=25)
+
 # ───────────────────────────────────────────────────────────────────────────────
 # 6) Report compile status (syntax only)
 st.subheader("ID Status (requested list)")
@@ -281,6 +336,8 @@ with st.expander("Skipped rows (reason + expression)", expanded=False):
                            file_name="skipped_ids.txt")
     else:
         st.write("No syntax errors.")
+
+st.caption(f"Similarity sample: **{len(sim_idx)}** triples  •  matched on: **{', '.join(used_keys) if used_keys else 'All (fallback)'}**")
 
 # ───────────────────────────────────────────────────────────────────────────────
 # 7) Runtime helpers
@@ -301,22 +358,20 @@ def filter_fires(row, ctx) -> bool:
         return False
 
 # ───────────────────────────────────────────────────────────────────────────────
-# 8) Per-filter metrics
+# 8) Per-filter metrics (SIMILAR SEEDS ONLY for keep%)
 metrics = []
-latest_seed = raw_hist[-1]
-prev1 = raw_hist[-2] if len(raw_hist) >= 2 else raw_hist[-1]
-prev2 = raw_hist[-3] if len(raw_hist) >= 3 else raw_hist[-1]
-
 for r in filters_csv:
     keep = 0; n = 0
-    for i in range(2, len(raw_hist)):
+    for i in sim_idx:
         seed, p1, pp = raw_hist[i], raw_hist[i-1], raw_hist[i-2]
+        # "Keep" means the filter does NOT fire on the real next winner
         ctx = gen_ctx_for_combo(seed, p1, pp, seed)
         fired = filter_fires(r, ctx)
         keep += (not fired)
         n += 1
     p, lb, ub = wilson_ci(keep, n)
 
+    # Elimination power on today's pool (current context)
     elim = 0
     for c in pool:
         ctx = gen_ctx_for_combo(latest_seed, prev1, prev2, c)
@@ -326,19 +381,21 @@ for r in filters_csv:
     wpp = p * elim_rate
     metrics.append({
         "id": r["id"], "name": r["name"],
-        "keep%": p, "keep_lb": lb, "keep_ub": ub,
-        "elim%": elim_rate, "wpp": wpp, "row": r
+        "keep%": p, "keep_lb": lb, "keep_ub": ub, "keep_n": n,
+        "elim%": elim_rate, "wpp": wpp, "row": r,
+        "match_keys": ", ".join(used_keys) if used_keys else "fallback",
     })
 
-st.subheader("Per-filter metrics")
+st.subheader("Per-filter metrics (similar seeds only)")
 df = pd.DataFrame(metrics).sort_values(["wpp","keep_lb","elim%"], ascending=[False,False,False])
 fmt = df.copy()
 for col in ["keep%","keep_lb","keep_ub","elim%","wpp"]:
     fmt[col] = (fmt[col]*100).round(2)
-st.dataframe(fmt[["id","name","keep%","keep_lb","keep_ub","elim%","wpp"]], use_container_width=True, height=420)
+fmt = fmt[["id","name","keep%","keep_lb","keep_ub","keep_n","elim%","wpp","match_keys"]]
+st.dataframe(fmt, use_container_width=True, height=440)
 
 # ───────────────────────────────────────────────────────────────────────────────
-# 9) Greedy bundle
+# 9) Greedy bundle (unchanged logic; uses current context for the pool)
 def apply_filters_bundle(rows: List[Dict[str,Any]], pool: List[str],
                          latest_seed: str, prev1: str, prev2: str) -> Tuple[int, List[str]]:
     survivors = []
@@ -353,10 +410,16 @@ def apply_filters_bundle(rows: List[Dict[str,Any]], pool: List[str],
 
 def bundle_keep_est(selected) -> float:
     if not selected: return 1.0
+    # Product model on similar-seed keep% (more meaningful than global)
     prod_elim = 1.0
     for m in selected:
         prod_elim *= (1.0 - m["keep%"])
     return 1.0 - prod_elim
+
+# Precompute pool firing sets to penalize redundancy
+latest_seed = raw_hist[-1]
+prev1 = raw_hist[-2] if len(raw_hist) >= 2 else raw_hist[-1]
+prev2 = raw_hist[-3] if len(raw_hist) >= 3 else raw_hist[-1]
 
 pool_fires: Dict[str,set] = {}
 for m in metrics:
@@ -404,7 +467,7 @@ final_n, final_survivors = apply_filters_bundle(selected_rows, pool, latest_seed
 st.subheader("Selected bundle")
 if selected:
     st.write(f"Filters chosen ({len(selected)}):", ", ".join(m['id'] for m in selected))
-    st.write(f"Projected winner survival (product model): {bundle_keep_est(selected):.2%}")
+    st.write(f"Projected winner survival (similar-seed model): {bundle_keep_est(selected):.2%}")
     st.write(f"Projected survivors (pool): {final_n}")
 else:
     st.info("No bundle found that satisfies the minimum survival. Lower the threshold or add history.")
@@ -423,3 +486,4 @@ with colR:
 
 with st.expander("Survivors (preview)"):
     st.code(", ".join(final_survivors), language="text")
+
