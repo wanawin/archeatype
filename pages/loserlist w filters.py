@@ -64,7 +64,7 @@ def loser_list(last13: List[str]):
     rank_prev,  rank_curr  = rank_of_digit(order_prev), rank_of_digit(order_curr)
 
     digit_prev_letters = {d: LETTERS[rank_prev[d]  - 1] for d in DIGITS}
-    digit_curr_letters = {d: LETTERTERS[rank_curr[d] - 1] for d in DIGITS}
+    digit_curr_letters = {d: LETTERS[rank_curr[d] - 1] for d in DIGITS}
 
     most_recent = rows[0]
     core_letters_prevmap = sorted({digit_prev_letters[d] for d in most_recent},
