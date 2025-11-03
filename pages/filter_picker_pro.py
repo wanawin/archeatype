@@ -1,16 +1,13 @@
 # file: filter_picker_pro.py
-import io, csv, ast, math, re, textwrap, warnings
+import io, csv, ast, math, re, textwrap
 from collections import Counter, defaultdict
 from typing import List, Dict, Any, Tuple
 import numpy as np
 import streamlit as st
 import pandas as pd
 
-# Quiet noisy literal warnings
-warnings.filterwarnings("ignore", category=SyntaxWarning)
-
 # ───────────────────────────────────────────────────────────────────────────────
-# 0) Safe built-ins + utility shims (mirrors tester page)
+# 0) Safe built-ins + utility shims  (mirrors tester page)
 ALLOWED_BUILTINS = {
     "len": len, "sum": sum, "any": any, "all": all,
     "set": set, "range": range, "sorted": sorted,
@@ -20,16 +17,20 @@ ALLOWED_BUILTINS = {
     "zip": zip, "map": map, "enumerate": enumerate,
     "Counter": Counter, "math": math,
 }
+
+# ord shim (some CSVs call ord() on non-chars; keep from crashing)
 def ord(x):
     try:
         return __builtins__.ord(x)
     except Exception:
         return 0
 
-# Sanitize leading-zero integers like 08, 009 (not floats like 0.8)
+# legacy 08/09 literal sanitizer, used if an expression fails to eval because of 08, 09, etc.
 _leading_zero_int = re.compile(r'(?<![\w])0+(\d+)(?!\s*\.)')
-def _sanitize_numeric_literals(code: str) -> str:
-    return _leading_zero_int.sub(r"\1", code or "")
+def _sanitize_numeric_literals(code_or_obj):
+    if isinstance(code_or_obj, str):
+        return _leading_zero_int.sub(r"\1", code_or_obj)
+    return code_or_obj
 
 def _eval(code_or_obj, ctx):
     g = {"__builtins__": ALLOWED_BUILTINS}
@@ -38,8 +39,8 @@ def _eval(code_or_obj, ctx):
     except SyntaxError:
         return eval(_sanitize_numeric_literals(code_or_obj), g, ctx)
 
+# Sum category + structure helpers (used by CSV)
 def sum_category(total: int) -> str:
-    # (Keep your preferred bands here; unchanged from prior app)
     if 0 <= total <= 14:  return 'Very Low'
     if 15 <= total <= 20: return 'Low'
     if 21 <= total <= 26: return 'Mid'
@@ -56,10 +57,11 @@ def structure_of(digits: List[int]) -> str:
     if c == [5]:         return 'QUINT'
     return f'OTHER-{c}'
 
+# V-TRAC & mirror maps + aliases used in CSV expressions
 V_TRAC_GROUPS = {0:1,5:1,1:2,6:2,2:3,7:3,3:4,8:4,4:5,9:5}
-MIRROR_PAIRS = {0:5,5:0,1:6,6:1,2:7,7:2,3:8,8:3,4:9,9:4}
+MIRROR_PAIRS  = {0:5,5:0,1:6,6:1,2:7,7:2,3:8,8:3,4:9,9:4}
 MIRROR = MIRROR_PAIRS
-mirror = MIRROR
+mirror = MIRROR  # many rows call mirror.get(d, -1)
 V_TRAC = V_TRAC_GROUPS
 VTRAC_GROUPS = V_TRAC_GROUPS
 vtrac = V_TRAC_GROUPS
@@ -85,12 +87,15 @@ with c2:
 with c3:
     chronology = st.radio("History order", ["Earliest→Latest", "Latest→Earliest"], index=0, horizontal=True)
 
-# Optional paste for filters CSV
-csv_text = st.text_area(
-    "Or paste filter CSV (15 columns with header)",
-    height=180,
-    placeholder="id,name,enabled,applicable_if,expression,Unnamed: 5,...,Unnamed: 14\n..."
-)
+# ── NEW: optional manual overrides for current context (ONLY change added) ─────
+with st.expander("Optional: override current context (seed / prev winners)", expanded=False):
+    seed_override  = st.text_input("Current seed (winner 1-back, 5 digits)",  "")
+    prev1_override = st.text_input("Prev 1 (2-back, 5 digits)",               "")
+    prev2_override = st.text_input("Prev 2 (3-back, 5 digits)",               "")
+
+def _digits5(s: str) -> str:
+    s = re.sub(r"\D", "", s or "")
+    return s if len(s) == 5 else ""
 
 ids_text = st.text_input("Optional: paste applicable filter IDs (comma/space separated). Leave blank to consider all compiled rows.")
 
@@ -116,22 +121,24 @@ def _norm_pool(text: str) -> List[str]:
         s = "".join(ch for ch in t if ch.isdigit())
         if len(s)==5: out.append(s)
     return sorted(set(out))
+
 pool = _norm_pool(pool_text)
 
 # ───────────────────────────────────────────────────────────────────────────────
-# 3) Load universal filter CSV (upload OR paste)
+# 3) Load universal filter CSV (same as tester)
 def _enabled_value(val: str) -> bool:
     s = (val or "").strip().lower()
     return s in {'"""true"""','"true"','true','1','yes','y'}
 
-def load_filters_csv(file=None, text: str = "") -> Tuple[List[Dict[str,Any]], List[Tuple[str,str,str,str]]]:
-    if text.strip():
-        data = text
-    elif file:
-        data = file.read().decode("utf-8", errors="ignore")
-        file.seek(0)
-    else:
-        return [], []
+def load_filters_csv(file) -> Tuple[List[Dict[str,Any]], List[Tuple[str,str,str,str]]]:
+    """
+    Returns (rows, syntactic_skips).
+    Each row: {id,name,enabled,app_code,expr_code,raw_app,raw_expr}
+    Syntactic skips: (id,name,reason,text_that_failed)
+    """
+    if not file: return [], []
+    data = file.read().decode("utf-8", errors="ignore")
+    file.seek(0)
     reader = csv.DictReader(io.StringIO(data))
     out, bad = [], []
     for raw in reader:
@@ -140,38 +147,33 @@ def load_filters_csv(file=None, text: str = "") -> Tuple[List[Dict[str,Any]], Li
         name = (row.get('name') or "").strip()
         applicable = (row.get('applicable_if') or "True").strip().strip("'").strip('"')
         expr = (row.get('expression') or "False").strip().strip("'").strip('"')
-
-        # Sanitize BEFORE parsing/compiling to avoid "invalid decimal literal"
-        applicable_s = _sanitize_numeric_literals(applicable)
-        expr_s = _sanitize_numeric_literals(expr)
-
         enabled = _enabled_value(row.get('enabled',''))
 
+        # Only **syntax** check and store compiled objects. Do **not** execute here.
         try:
-            ast.parse(f"({applicable_s})", mode='eval')
-            app_code = compile(applicable_s, '<app>', 'eval')
+            ast.parse(f"({applicable})", mode='eval'); app_code = compile(applicable, '<app>', 'eval')
         except Exception as e:
             bad.append((fid, name, f"applicable_if parse: {e.__class__.__name__}: {e}", applicable))
             continue
 
         try:
-            ast.parse(f"({expr_s})", mode='eval')
-            expr_code = compile(expr_s, '<expr>', 'eval')
+            ast.parse(f"({expr})", mode='eval'); expr_code = compile(expr, '<expr>', 'eval')
         except Exception as e:
             bad.append((fid, name, f"expression parse: {e.__class__.__name__}: {e}", expr))
             continue
 
         out.append({"id":fid, "name":name, "enabled":enabled,
                     "app_code":app_code, "expr_code":expr_code,
-                    "raw_app":applicable_s, "raw_expr":expr_s})
+                    "raw_app":applicable, "raw_expr":expr})
     return out, bad
 
-filters_csv, syntactic_skips = load_filters_csv(filt_file, csv_text)
+filters_csv, syntactic_skips = load_filters_csv(filt_file)
 
-# Optional ID restriction
+# If IDs pasted, restrict to those
 applicable_ids = set()
 if ids_text.strip():
     applicable_ids = {t.strip().upper() for t in re.split(r"[,\s]+", ids_text) if t.strip()}
+
 if applicable_ids:
     filters_csv = [r for r in filters_csv if r["id"].upper() in applicable_ids]
 
@@ -181,6 +183,7 @@ def _read_history(file) -> List[str]:
     if not file: return []
     body = file.read().decode("utf-8", errors="ignore")
     file.seek(0)
+    # csv or txt: scan all 5-digit tokens
     digs = re.findall(r"\b\d{5}\b", body)
     return digs
 
@@ -191,27 +194,13 @@ if raw_hist and chronology == "Latest→Earliest":
 def _winner_triples(arr: List[str]) -> List[Tuple[str,str,str]]:
     triples = []
     for i in range(2, len(arr)):
-        # (seed, prev1, prev2) aligned to "next winner" context
-        triples.append((arr[i], arr[i-1], arr[i-2]))
+        triples.append((arr[i-2], arr[i-1], arr[i]))
     return triples
 
 triples = _winner_triples(raw_hist)
 
 # ───────────────────────────────────────────────────────────────────────────────
-# 4.5) Input readiness (diagnostic)
-st.caption(
-    f"🧩 Input readiness — Filters: **{len(filters_csv)}** | History draws: **{len(raw_hist)}** | Pool size: **{len(pool)}**"
-)
-if not filters_csv or not raw_hist or not pool:
-    missing = []
-    if not filters_csv: missing.append("filters CSV (upload or paste)")
-    if not raw_hist:   missing.append("history file (TXT/CSV)")
-    if not pool:       missing.append("pool in the top textarea")
-    st.info("Load CSV + history + pool, then click **Compute / Rebuild**. Missing: " + ", ".join(missing))
-    st.stop()
-
-# ───────────────────────────────────────────────────────────────────────────────
-# 5) Context + similarity profiles
+# 5) Context generator – mirrors tester page names
 def gen_ctx_for_combo(seed:str, prev:str, prev2:str, combo:str,
                       hot=None, cold=None, due=None):
     seed_digits = [int(x) for x in seed]
@@ -260,72 +249,19 @@ def gen_ctx_for_combo(seed:str, prev:str, prev2:str, combo:str,
         "sum_category": sum_category, "structure_of": structure_of,
         "Counter": Counter,
 
+        # **Defaults** so filters that reference these never crash
         "hot_digits": list(hot) if hot is not None else [],
         "cold_digits": list(cold) if cold is not None else [],
         "due_digits": list(due) if due is not None else [],
     }
     return ctx
 
-def carry_bucket(seed_digits: List[int], prev_digits: List[int]) -> str:
-    shared = len(set(seed_digits) & set(prev_digits))
-    if shared == 0: return "C0"
-    if shared == 1: return "C1"
-    return "C2plus"
-
-def profile_triple(seed: str, prev1: str) -> Tuple[str,str,str]:
-    sd = [int(x) for x in seed]
-    pd = [int(x) for x in prev1] if prev1 else []
-    return (
-        sum_category(sum(sd)),
-        structure_of(sd),
-        carry_bucket(sd, pd),
-    )
-
-# Current (latest) profile
-latest_seed = raw_hist[-1]
-prev1 = raw_hist[-2] if len(raw_hist) >= 2 else raw_hist[-1]
-prev2 = raw_hist[-3] if len(raw_hist) >= 3 else raw_hist[-1]
-current_profile = profile_triple(latest_seed, prev1)
-
-# Build similarity indices with relaxor
-def similar_indices(min_samples: int = 25) -> Tuple[List[int], Tuple[str,...]]:
-    # Build all profiles
-    profs = []
-    for i in range(2, len(raw_hist)):
-        seed, p1 = raw_hist[i], raw_hist[i-1]
-        profs.append((i, profile_triple(seed, p1)))
-
-    keys_all = ("sumcat", "struct", "carry")
-    cur_sumcat, cur_struct, cur_carry = current_profile
-
-    def match(p, keys):
-        sc, stc, car = p
-        ok = True
-        if "sumcat" in keys: ok &= (sc == cur_sumcat)
-        if "struct" in keys: ok &= (stc == cur_struct)
-        if "carry"  in keys: ok &= (car == cur_carry)
-        return ok
-
-    # Try 3→2→1 keys until we have enough samples
-    for use_keys in [
-        ("sumcat","struct","carry"),
-        ("sumcat","struct"),
-        ("sumcat","carry"),
-        ("struct","carry"),
-        ("sumcat",),
-    ]:
-        idx = [i for (i, p) in profs if match(p, use_keys)]
-        if len(idx) >= min_samples:
-            return idx, use_keys
-    # Fall back to everything if still small
-    return [i for (i, _) in profs], tuple()
-
-sim_idx, used_keys = similar_indices(min_samples=25)
-
 # ───────────────────────────────────────────────────────────────────────────────
-# 6) Report compile status (syntax only)
+# 6) Report true compile status (syntax only) + give copy/download of skips
 st.subheader("ID Status (requested list)")
+req = len(applicable_ids) if applicable_ids else len(filters_csv)
 st.caption(f"Compiled (syntax OK): {len(filters_csv)} | Skipped (syntax errors): {len(syntactic_skips)}.")
+
 with st.expander("Skipped rows (reason + expression)", expanded=False):
     if syntactic_skips:
         df_skip = pd.DataFrame(syntactic_skips, columns=["id","name","reason","expr"])
@@ -337,10 +273,13 @@ with st.expander("Skipped rows (reason + expression)", expanded=False):
     else:
         st.write("No syntax errors.")
 
-st.caption(f"Similarity sample: **{len(sim_idx)}** triples  •  matched on: **{', '.join(used_keys) if used_keys else 'All (fallback)'}**")
+# Stop if inputs incomplete
+if not (filters_csv and triples and pool):
+    st.info("Load CSV + history + pool (and optionally paste applicable IDs), then click Compute / Rebuild.")
+    st.stop()
 
 # ───────────────────────────────────────────────────────────────────────────────
-# 7) Runtime helpers
+# 7) Runtime evaluation helpers
 def wilson_ci(k, n, z=1.96):
     if n==0: return (0.0, 0.0, 0.0)
     p = k/n
@@ -355,35 +294,72 @@ def filter_fires(row, ctx) -> bool:
             return False
         return bool(_eval(row["expr_code"], ctx))
     except Exception:
+        # At runtime we still guard; if anything explodes, treat as NOT firing.
         return False
 
 # ───────────────────────────────────────────────────────────────────────────────
-# 8) Per-filter metrics (SIMILAR SEEDS ONLY for keep%)
+# 8) Per-filter metrics (history-similarity + pool elim)
+
+# Determine current context (seed/prev) from history …
+latest_seed = raw_hist[-1]
+prev1 = raw_hist[-2] if len(raw_hist) >= 2 else raw_hist[-1]
+prev2 = raw_hist[-3] if len(raw_hist) >= 3 else raw_hist[-1]
+
+# … and apply manual overrides if provided (ONLY change added)
+ov_seed = _digits5(seed_override)
+ov_p1   = _digits5(prev1_override)
+ov_p2   = _digits5(prev2_override)
+if ov_seed:
+    latest_seed = ov_seed
+    if ov_p1: prev1 = ov_p1
+    if ov_p2: prev2 = ov_p2
+
+# Similarity profile helper
+def profile_triple(seed:str, prev:str):
+    digs = [int(x) for x in seed]
+    return {
+        "sumcat": sum_category(sum(digs)),
+        "struct": structure_of(digs),
+    }
+
+current_profile = profile_triple(latest_seed, prev1)
+
+def is_similar(seed:str, prev:str) -> bool:
+    p = profile_triple(seed, prev)
+    # lightweight match on sum category + structure
+    return (p["sumcat"] == current_profile["sumcat"]) and (p["struct"] == current_profile["struct"])
+
+# Build the set of similar triples (pp, p1, seed)
+sim_triples = []
+for pp, p1, sd in triples:
+    if is_similar(sd, p1):
+        sim_triples.append((pp, p1, sd))
+
 metrics = []
+
+# history (keep%), pool (elim%), WPP
 for r in filters_csv:
     keep = 0; n = 0
-    for i in sim_idx:
-        seed, p1, pp = raw_hist[i], raw_hist[i-1], raw_hist[i-2]
-        # "Keep" means the filter does NOT fire on the real next winner
+    for pp, p1, seed in sim_triples:
         ctx = gen_ctx_for_combo(seed, p1, pp, seed)
         fired = filter_fires(r, ctx)
         keep += (not fired)
         n += 1
     p, lb, ub = wilson_ci(keep, n)
 
-    # Elimination power on today's pool (current context)
     elim = 0
     for c in pool:
         ctx = gen_ctx_for_combo(latest_seed, prev1, prev2, c)
         if filter_fires(r, ctx): elim += 1
     elim_rate = elim / max(1, len(pool))
 
-    wpp = p * elim_rate
+    alpha = 1.0
+    wpp = p * (elim_rate ** alpha)
+
     metrics.append({
         "id": r["id"], "name": r["name"],
-        "keep%": p, "keep_lb": lb, "keep_ub": ub, "keep_n": n,
-        "elim%": elim_rate, "wpp": wpp, "row": r,
-        "match_keys": ", ".join(used_keys) if used_keys else "fallback",
+        "keep%": p, "keep_lb": lb, "keep_ub": ub,
+        "elim%": elim_rate, "wpp": wpp, "row": r
     })
 
 st.subheader("Per-filter metrics (similar seeds only)")
@@ -391,11 +367,11 @@ df = pd.DataFrame(metrics).sort_values(["wpp","keep_lb","elim%"], ascending=[Fal
 fmt = df.copy()
 for col in ["keep%","keep_lb","keep_ub","elim%","wpp"]:
     fmt[col] = (fmt[col]*100).round(2)
-fmt = fmt[["id","name","keep%","keep_lb","keep_ub","keep_n","elim%","wpp","match_keys"]]
-st.dataframe(fmt, use_container_width=True, height=440)
+st.dataframe(fmt[["id","name","keep%","keep_lb","keep_ub","elim%","wpp"]],
+             use_container_width=True, height=420)
 
 # ───────────────────────────────────────────────────────────────────────────────
-# 9) Greedy bundle (unchanged logic; uses current context for the pool)
+# 9) Greedy bundle
 def apply_filters_bundle(rows: List[Dict[str,Any]], pool: List[str],
                          latest_seed: str, prev1: str, prev2: str) -> Tuple[int, List[str]]:
     survivors = []
@@ -410,17 +386,12 @@ def apply_filters_bundle(rows: List[Dict[str,Any]], pool: List[str],
 
 def bundle_keep_est(selected) -> float:
     if not selected: return 1.0
-    # Product model on similar-seed keep% (more meaningful than global)
     prod_elim = 1.0
     for m in selected:
         prod_elim *= (1.0 - m["keep%"])
     return 1.0 - prod_elim
 
 # Precompute pool firing sets to penalize redundancy
-latest_seed = raw_hist[-1]
-prev1 = raw_hist[-2] if len(raw_hist) >= 2 else raw_hist[-1]
-prev2 = raw_hist[-3] if len(raw_hist) >= 3 else raw_hist[-1]
-
 pool_fires: Dict[str,set] = {}
 for m in metrics:
     fired = set()
@@ -441,6 +412,7 @@ while candidates:
         est_keep = bundle_keep_est(trial)
         if est_keep < min_keep:
             continue
+
         if selected:
             overlap = max((len(pool_fires[m["id"]] & pool_fires[s["id"]]) /
                            max(1,len(pool_fires[m["id"]] | pool_fires[s["id"]]))) for s in selected)
@@ -453,13 +425,16 @@ while candidates:
         delta = (current_survivors - est_survivors) * pen
         if delta > best_delta:
             best_delta, best = delta, m
+
     if not best:
         break
+
     selected.append(best)
     selected_rows.append(best["row"])
     current_survivors = len(pool) - len(set().union(*[pool_fires[s["id"]] for s in selected]))
     if current_survivors <= target_survivors:
         break
+
     candidates = [c for c in candidates if c["id"] != best["id"]]
 
 final_n, final_survivors = apply_filters_bundle(selected_rows, pool, latest_seed, prev1, prev2)
@@ -467,7 +442,7 @@ final_n, final_survivors = apply_filters_bundle(selected_rows, pool, latest_seed
 st.subheader("Selected bundle")
 if selected:
     st.write(f"Filters chosen ({len(selected)}):", ", ".join(m['id'] for m in selected))
-    st.write(f"Projected winner survival (similar-seed model): {bundle_keep_est(selected):.2%}")
+    st.write(f"Projected winner survival (product model): {bundle_keep_est(selected):.2%}")
     st.write(f"Projected survivors (pool): {final_n}")
 else:
     st.info("No bundle found that satisfies the minimum survival. Lower the threshold or add history.")
@@ -486,4 +461,3 @@ with colR:
 
 with st.expander("Survivors (preview)"):
     st.code(", ".join(final_survivors), language="text")
-
