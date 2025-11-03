@@ -87,7 +87,15 @@ with c2:
 with c3:
     chronology = st.radio("History order", ["Earliest→Latest", "Latest→Earliest"], index=0, horizontal=True)
 
-# ── NEW: optional manual overrides for current context (ONLY change added) ─────
+# NEW: pasteable filter CSV (15 columns with header) — alongside upload
+with st.expander("Or paste master filter CSV (15 columns with header)", expanded=False):
+    pasted_filters_csv = st.text_area(
+        "Paste CSV here (will be used only if no file is uploaded). Header must include the 15 columns.",
+        height=220,
+        placeholder='id,name,enabled,applicable_if,expression,Unnamed: 5,Unnamed: 6,Unnamed: 7,Unnamed: 8,Unnamed: 9,Unnamed: 10,Unnamed: 11,Unnamed: 12,Unnamed: 13,Unnamed: 14\nCF14,Eliminate if any J-letter digit present,TRUE,,"sum(1 for d in combo_digits if d in [5]) >= 1",,,,,,,,,,'
+    )
+
+# ── Optional manual overrides for current context (seed / prev winners)
 with st.expander("Optional: override current context (seed / prev winners)", expanded=False):
     seed_override  = st.text_input("Current seed (winner 1-back, 5 digits)",  "")
     prev1_override = st.text_input("Prev 1 (2-back, 5 digits)",               "")
@@ -130,16 +138,10 @@ def _enabled_value(val: str) -> bool:
     s = (val or "").strip().lower()
     return s in {'"""true"""','"true"','true','1','yes','y'}
 
-def load_filters_csv(file) -> Tuple[List[Dict[str,Any]], List[Tuple[str,str,str,str]]]:
-    """
-    Returns (rows, syntactic_skips).
-    Each row: {id,name,enabled,app_code,expr_code,raw_app,raw_expr}
-    Syntactic skips: (id,name,reason,text_that_failed)
-    """
-    if not file: return [], []
-    data = file.read().decode("utf-8", errors="ignore")
-    file.seek(0)
-    reader = csv.DictReader(io.StringIO(data))
+def load_filters_csv_from_str(csv_text: str) -> Tuple[List[Dict[str,Any]], List[Tuple[str,str,str,str]]]:
+    if not csv_text.strip():
+        return [], []
+    reader = csv.DictReader(io.StringIO(csv_text))
     out, bad = [], []
     for raw in reader:
         row = { (k or "").strip().lower(): (v or "").strip() for k,v in raw.items() }
@@ -149,7 +151,6 @@ def load_filters_csv(file) -> Tuple[List[Dict[str,Any]], List[Tuple[str,str,str,
         expr = (row.get('expression') or "False").strip().strip("'").strip('"')
         enabled = _enabled_value(row.get('enabled',''))
 
-        # Only **syntax** check and store compiled objects. Do **not** execute here.
         try:
             ast.parse(f"({applicable})", mode='eval'); app_code = compile(applicable, '<app>', 'eval')
         except Exception as e:
@@ -167,7 +168,16 @@ def load_filters_csv(file) -> Tuple[List[Dict[str,Any]], List[Tuple[str,str,str,
                     "raw_app":applicable, "raw_expr":expr})
     return out, bad
 
-filters_csv, syntactic_skips = load_filters_csv(filt_file)
+def load_filters_csv(file) -> Tuple[List[Dict[str,Any]], List[Tuple[str,str,str,str]]]:
+    if not file:
+        return [], []
+    data = file.read().decode("utf-8", errors="ignore")
+    file.seek(0)
+    return load_filters_csv_from_str(data)
+
+# Priority: uploaded file; if not present, use pasted CSV
+filters_csv, syntactic_skips = (load_filters_csv(filt_file) if filt_file
+                                else load_filters_csv_from_str(pasted_filters_csv))
 
 # If IDs pasted, restrict to those
 applicable_ids = set()
@@ -252,14 +262,13 @@ def gen_ctx_for_combo(seed:str, prev:str, prev2:str, combo:str,
         # **Defaults** so filters that reference these never crash
         "hot_digits": list(hot) if hot is not None else [],
         "cold_digits": list(cold) if cold is not None else [],
-        "due_digits": list(due) if due is not None else [],
+        "due_digits": list(due) if hot is not None else [],
     }
     return ctx
 
 # ───────────────────────────────────────────────────────────────────────────────
-# 6) Report true compile status (syntax only) + give copy/download of skips
+# 6) Report compile status (syntax only)
 st.subheader("ID Status (requested list)")
-req = len(applicable_ids) if applicable_ids else len(filters_csv)
 st.caption(f"Compiled (syntax OK): {len(filters_csv)} | Skipped (syntax errors): {len(syntactic_skips)}.")
 
 with st.expander("Skipped rows (reason + expression)", expanded=False):
@@ -275,7 +284,7 @@ with st.expander("Skipped rows (reason + expression)", expanded=False):
 
 # Stop if inputs incomplete
 if not (filters_csv and triples and pool):
-    st.info("Load CSV + history + pool (and optionally paste applicable IDs), then click Compute / Rebuild.")
+    st.info("Load/paste CSV + history + pool (and optionally paste applicable IDs), then click Compute / Rebuild.")
     st.stop()
 
 # ───────────────────────────────────────────────────────────────────────────────
@@ -305,7 +314,7 @@ latest_seed = raw_hist[-1]
 prev1 = raw_hist[-2] if len(raw_hist) >= 2 else raw_hist[-1]
 prev2 = raw_hist[-3] if len(raw_hist) >= 3 else raw_hist[-1]
 
-# … and apply manual overrides if provided (ONLY change added)
+# … and apply manual overrides if provided
 ov_seed = _digits5(seed_override)
 ov_p1   = _digits5(prev1_override)
 ov_p2   = _digits5(prev2_override)
