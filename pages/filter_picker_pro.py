@@ -18,14 +18,12 @@ ALLOWED_BUILTINS = {
     "Counter": Counter, "math": math,
 }
 
-# ord shim (some CSVs call ord() on non-chars; keep from crashing)
 def ord(x):
     try:
         return __builtins__.ord(x)
     except Exception:
         return 0
 
-# legacy 08/09 literal sanitizer, used if an expression fails to eval because of 08, 09, etc.
 _leading_zero_int = re.compile(r'(?<![\w])0+(\d+)(?!\s*\.)')
 def _sanitize_numeric_literals(code_or_obj):
     if isinstance(code_or_obj, str):
@@ -39,7 +37,6 @@ def _eval(code_or_obj, ctx):
     except SyntaxError:
         return eval(_sanitize_numeric_literals(code_or_obj), g, ctx)
 
-# Sum category + structure helpers (used by CSV)
 def sum_category(total: int) -> str:
     if 0 <= total <= 14:  return 'Very Low'
     if 15 <= total <= 20: return 'Low'
@@ -57,11 +54,10 @@ def structure_of(digits: List[int]) -> str:
     if c == [5]:         return 'QUINT'
     return f'OTHER-{c}'
 
-# V-TRAC & mirror maps + aliases used in CSV expressions
 V_TRAC_GROUPS = {0:1,5:1,1:2,6:2,2:3,7:3,3:4,8:4,4:5,9:5}
 MIRROR_PAIRS  = {0:5,5:0,1:6,6:1,2:7,7:2,3:8,8:3,4:9,9:4}
 MIRROR = MIRROR_PAIRS
-mirror = MIRROR  # many rows call mirror.get(d, -1)
+mirror = MIRROR
 V_TRAC = V_TRAC_GROUPS
 VTRAC_GROUPS = V_TRAC_GROUPS
 vtrac = V_TRAC_GROUPS
@@ -87,15 +83,13 @@ with c2:
 with c3:
     chronology = st.radio("History order", ["Earliest→Latest", "Latest→Earliest"], index=0, horizontal=True)
 
-# NEW: pasteable filter CSV (15 columns with header) — alongside upload
 with st.expander("Or paste master filter CSV (15 columns with header)", expanded=False):
     pasted_filters_csv = st.text_area(
-        "Paste CSV here (will be used only if no file is uploaded). Header must include the 15 columns.",
+        "Paste CSV here (used only if you don't upload a file).",
         height=220,
         placeholder='id,name,enabled,applicable_if,expression,Unnamed: 5,Unnamed: 6,Unnamed: 7,Unnamed: 8,Unnamed: 9,Unnamed: 10,Unnamed: 11,Unnamed: 12,Unnamed: 13,Unnamed: 14\nCF14,Eliminate if any J-letter digit present,TRUE,,"sum(1 for d in combo_digits if d in [5]) >= 1",,,,,,,,,,'
     )
 
-# ── Optional manual overrides for current context (seed / prev winners)
 with st.expander("Optional: override current context (seed / prev winners)", expanded=False):
     seed_override  = st.text_input("Current seed (winner 1-back, 5 digits)",  "")
     prev1_override = st.text_input("Prev 1 (2-back, 5 digits)",               "")
@@ -109,11 +103,22 @@ ids_text = st.text_input("Optional: paste applicable filter IDs (comma/space sep
 
 cA, cB, cC = st.columns([1,1,1])
 with cA:
-    min_keep = st.slider("Min winner survival (bundle)", 0.50, 0.99, 0.75, 0.01)
+    min_keep = st.slider("Min winner survival (bundle)", 0.00, 0.99, 0.75, 0.01)
 with cB:
     target_survivors = st.number_input("Target survivors (bundle)", 10, 2000, 50, 10)
 with cC:
     redundancy_pen = st.slider("Redundancy penalty (diversity)", 0.0, 1.0, 0.2, 0.05)
+
+# NEW: objective + size cap
+cObj, cCap = st.columns([1,1])
+with cObj:
+    bundle_mode = st.selectbox(
+        "Bundle objective",
+        ["Balance keep & trim (current)", "Trim-only (ignore history)"],
+        index=0
+    )
+with cCap:
+    max_bundle = st.number_input("Max filters in bundle", 1, 30, 8, 1)
 
 run_btn = st.button("Compute / Rebuild", type="primary", use_container_width=True)
 
@@ -133,7 +138,7 @@ def _norm_pool(text: str) -> List[str]:
 pool = _norm_pool(pool_text)
 
 # ───────────────────────────────────────────────────────────────────────────────
-# 3) Load universal filter CSV (same as tester)
+# 3) Load universal filter CSV
 def _enabled_value(val: str) -> bool:
     s = (val or "").strip().lower()
     return s in {'"""true"""','"true"','true','1','yes','y'}
@@ -175,25 +180,21 @@ def load_filters_csv(file) -> Tuple[List[Dict[str,Any]], List[Tuple[str,str,str,
     file.seek(0)
     return load_filters_csv_from_str(data)
 
-# Priority: uploaded file; if not present, use pasted CSV
 filters_csv, syntactic_skips = (load_filters_csv(filt_file) if filt_file
                                 else load_filters_csv_from_str(pasted_filters_csv))
 
-# If IDs pasted, restrict to those
 applicable_ids = set()
 if ids_text.strip():
     applicable_ids = {t.strip().upper() for t in re.split(r"[,\s]+", ids_text) if t.strip()}
-
 if applicable_ids:
     filters_csv = [r for r in filters_csv if r["id"].upper() in applicable_ids]
 
 # ───────────────────────────────────────────────────────────────────────────────
-# 4) Parse history + build winner triples
+# 4) Parse history + triples
 def _read_history(file) -> List[str]:
     if not file: return []
     body = file.read().decode("utf-8", errors="ignore")
     file.seek(0)
-    # csv or txt: scan all 5-digit tokens
     digs = re.findall(r"\b\d{5}\b", body)
     return digs
 
@@ -210,7 +211,7 @@ def _winner_triples(arr: List[str]) -> List[Tuple[str,str,str]]:
 triples = _winner_triples(raw_hist)
 
 # ───────────────────────────────────────────────────────────────────────────────
-# 5) Context generator – mirrors tester page names
+# 5) Context generator
 def gen_ctx_for_combo(seed:str, prev:str, prev2:str, combo:str,
                       hot=None, cold=None, due=None):
     seed_digits = [int(x) for x in seed]
@@ -259,7 +260,6 @@ def gen_ctx_for_combo(seed:str, prev:str, prev2:str, combo:str,
         "sum_category": sum_category, "structure_of": structure_of,
         "Counter": Counter,
 
-        # **Defaults** so filters that reference these never crash
         "hot_digits": list(hot) if hot is not None else [],
         "cold_digits": list(cold) if cold is not None else [],
         "due_digits": list(due) if hot is not None else [],
@@ -267,7 +267,7 @@ def gen_ctx_for_combo(seed:str, prev:str, prev2:str, combo:str,
     return ctx
 
 # ───────────────────────────────────────────────────────────────────────────────
-# 6) Report compile status (syntax only)
+# 6) Compile status
 st.subheader("ID Status (requested list)")
 st.caption(f"Compiled (syntax OK): {len(filters_csv)} | Skipped (syntax errors): {len(syntactic_skips)}.")
 
@@ -282,13 +282,12 @@ with st.expander("Skipped rows (reason + expression)", expanded=False):
     else:
         st.write("No syntax errors.")
 
-# Stop if inputs incomplete
 if not (filters_csv and triples and pool):
     st.info("Load/paste CSV + history + pool (and optionally paste applicable IDs), then click Compute / Rebuild.")
     st.stop()
 
 # ───────────────────────────────────────────────────────────────────────────────
-# 7) Runtime evaluation helpers
+# 7) Metrics
 def wilson_ci(k, n, z=1.96):
     if n==0: return (0.0, 0.0, 0.0)
     p = k/n
@@ -303,18 +302,12 @@ def filter_fires(row, ctx) -> bool:
             return False
         return bool(_eval(row["expr_code"], ctx))
     except Exception:
-        # At runtime we still guard; if anything explodes, treat as NOT firing.
         return False
 
-# ───────────────────────────────────────────────────────────────────────────────
-# 8) Per-filter metrics (history-similarity + pool elim)
-
-# Determine current context (seed/prev) from history …
 latest_seed = raw_hist[-1]
 prev1 = raw_hist[-2] if len(raw_hist) >= 2 else raw_hist[-1]
 prev2 = raw_hist[-3] if len(raw_hist) >= 3 else raw_hist[-1]
 
-# … and apply manual overrides if provided
 ov_seed = _digits5(seed_override)
 ov_p1   = _digits5(prev1_override)
 ov_p2   = _digits5(prev2_override)
@@ -323,30 +316,18 @@ if ov_seed:
     if ov_p1: prev1 = ov_p1
     if ov_p2: prev2 = ov_p2
 
-# Similarity profile helper
 def profile_triple(seed:str, prev:str):
     digs = [int(x) for x in seed]
-    return {
-        "sumcat": sum_category(sum(digs)),
-        "struct": structure_of(digs),
-    }
+    return {"sumcat": sum_category(sum(digs)), "struct": structure_of(digs)}
 
 current_profile = profile_triple(latest_seed, prev1)
-
 def is_similar(seed:str, prev:str) -> bool:
     p = profile_triple(seed, prev)
-    # lightweight match on sum category + structure
     return (p["sumcat"] == current_profile["sumcat"]) and (p["struct"] == current_profile["struct"])
 
-# Build the set of similar triples (pp, p1, seed)
-sim_triples = []
-for pp, p1, sd in triples:
-    if is_similar(sd, p1):
-        sim_triples.append((pp, p1, sd))
-
+sim_triples = [(pp, p1, sd) for (pp,p1,sd) in triples if is_similar(sd, p1)]
 metrics = []
 
-# history (keep%), pool (elim%), WPP
 for r in filters_csv:
     keep = 0; n = 0
     for pp, p1, seed in sim_triples:
@@ -362,8 +343,11 @@ for r in filters_csv:
         if filter_fires(r, ctx): elim += 1
     elim_rate = elim / max(1, len(pool))
 
-    alpha = 1.0
-    wpp = p * (elim_rate ** alpha)
+    # WPP: in Trim-only mode we ignore 'p'; in Balanced we keep current behavior
+    if bundle_mode.startswith("Trim-only"):
+        wpp = elim_rate  # pure trimmer score
+    else:
+        wpp = p * elim_rate
 
     metrics.append({
         "id": r["id"], "name": r["name"],
@@ -380,7 +364,7 @@ st.dataframe(fmt[["id","name","keep%","keep_lb","keep_ub","elim%","wpp"]],
              use_container_width=True, height=420)
 
 # ───────────────────────────────────────────────────────────────────────────────
-# 9) Greedy bundle
+# 8) Greedy bundle
 def apply_filters_bundle(rows: List[Dict[str,Any]], pool: List[str],
                          latest_seed: str, prev1: str, prev2: str) -> Tuple[int, List[str]]:
     survivors = []
@@ -413,13 +397,16 @@ selected, selected_rows = [], []
 current_survivors = len(pool)
 candidates = sorted(metrics, key=lambda x: (x["wpp"], x["keep_lb"]), reverse=True)
 
-while candidates:
+# Effective survival threshold: 0 in Trim-only mode
+min_keep_effective = 0.0 if bundle_mode.startswith("Trim-only") else float(min_keep)
+
+while candidates and len(selected) < max_bundle:
     best_delta = 0
     best = None
     for m in candidates:
         trial = selected + [m]
         est_keep = bundle_keep_est(trial)
-        if est_keep < min_keep:
+        if est_keep < min_keep_effective:
             continue
 
         if selected:
@@ -451,10 +438,13 @@ final_n, final_survivors = apply_filters_bundle(selected_rows, pool, latest_seed
 st.subheader("Selected bundle")
 if selected:
     st.write(f"Filters chosen ({len(selected)}):", ", ".join(m['id'] for m in selected))
-    st.write(f"Projected winner survival (product model): {bundle_keep_est(selected):.2%}")
+    if bundle_mode.startswith("Trim-only"):
+        st.write("Projected winner survival (ignored in Trim-only mode).")
+    else:
+        st.write(f"Projected winner survival (product model): {bundle_keep_est(selected):.2%}")
     st.write(f"Projected survivors (pool): {final_n}")
 else:
-    st.info("No bundle found that satisfies the minimum survival. Lower the threshold or add history.")
+    st.info("No bundle found that satisfies the constraints. Try Trim-only or lower the survival threshold.")
 
 colL, colR = st.columns(2)
 with colL:
