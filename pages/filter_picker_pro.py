@@ -18,12 +18,14 @@ ALLOWED_BUILTINS = {
     "Counter": Counter, "math": math,
 }
 
+# ord shim (some CSVs call ord() on non-chars; keep from crashing)
 def ord(x):
     try:
         return __builtins__.ord(x)
     except Exception:
         return 0
 
+# Sanitize leading-zero numeric literals like 08, 09 before parsing/eval
 _leading_zero_int = re.compile(r'(?<![\w])0+(\d+)(?!\s*\.)')
 def _sanitize_numeric_literals(code_or_obj):
     if isinstance(code_or_obj, str):
@@ -37,6 +39,7 @@ def _eval(code_or_obj, ctx):
     except SyntaxError:
         return eval(_sanitize_numeric_literals(code_or_obj), g, ctx)
 
+# Sum category + structure helpers (used by CSV)
 def sum_category(total: int) -> str:
     if 0 <= total <= 14:  return 'Very Low'
     if 15 <= total <= 20: return 'Low'
@@ -54,10 +57,11 @@ def structure_of(digits: List[int]) -> str:
     if c == [5]:         return 'QUINT'
     return f'OTHER-{c}'
 
+# V-TRAC & mirror maps + aliases used in CSV expressions
 V_TRAC_GROUPS = {0:1,5:1,1:2,6:2,2:3,7:3,3:4,8:4,4:5,9:5}
 MIRROR_PAIRS  = {0:5,5:0,1:6,6:1,2:7,7:2,3:8,8:3,4:9,9:4}
 MIRROR = MIRROR_PAIRS
-mirror = MIRROR
+mirror = MIRROR  # many rows call mirror.get(d, -1)
 V_TRAC = V_TRAC_GROUPS
 VTRAC_GROUPS = V_TRAC_GROUPS
 vtrac = V_TRAC_GROUPS
@@ -87,7 +91,9 @@ with st.expander("Or paste master filter CSV (15 columns with header)", expanded
     pasted_filters_csv = st.text_area(
         "Paste CSV here (used only if you don't upload a file).",
         height=220,
-        placeholder='id,name,enabled,applicable_if,expression,Unnamed: 5,Unnamed: 6,Unnamed: 7,Unnamed: 8,Unnamed: 9,Unnamed: 10,Unnamed: 11,Unnamed: 12,Unnamed: 13,Unnamed: 14\nCF14,Eliminate if any J-letter digit present,TRUE,,"sum(1 for d in combo_digits if d in [5]) >= 1",,,,,,,,,,'
+        placeholder=('id,name,enabled,applicable_if,expression,Unnamed: 5,Unnamed: 6,Unnamed: 7,Unnamed: 8,'
+                     'Unnamed: 9,Unnamed: 10,Unnamed: 11,Unnamed: 12,Unnamed: 13,Unnamed: 14\n'
+                     'CF14,Eliminate if any J-letter digit present,TRUE,,"sum(1 for d in combo_digits if d in [5]) >= 1",,,,,,,,,,')
     )
 
 with st.expander("Optional: override current context (seed / prev winners)", expanded=False):
@@ -109,7 +115,7 @@ with cB:
 with cC:
     redundancy_pen = st.slider("Redundancy penalty (diversity)", 0.0, 1.0, 0.2, 0.05)
 
-# NEW: objective + size cap
+# Objective + bundle cap (kept from your last working version)
 cObj, cCap = st.columns([1,1])
 with cObj:
     bundle_mode = st.selectbox(
@@ -138,10 +144,20 @@ def _norm_pool(text: str) -> List[str]:
 pool = _norm_pool(pool_text)
 
 # ───────────────────────────────────────────────────────────────────────────────
-# 3) Load universal filter CSV
+# 3) Load universal filter CSV (upload or pasted)
 def _enabled_value(val: str) -> bool:
     s = (val or "").strip().lower()
     return s in {'"""true"""','"true"','true','1','yes','y'}
+
+def _compile_row(fid: str, name: str, applicable: str, expr: str):
+    # sanitize leading-zero ints BEFORE parsing to avoid decimal literal errors
+    applicable_s = _sanitize_numeric_literals(applicable)
+    expr_s = _sanitize_numeric_literals(expr)
+    ast.parse(f"({applicable_s})", mode='eval')
+    ast.parse(f"({expr_s})", mode='eval')
+    app_code = compile(applicable_s, '<app>', 'eval')
+    expr_code = compile(expr_s, '<expr>', 'eval')
+    return app_code, expr_code
 
 def load_filters_csv_from_str(csv_text: str) -> Tuple[List[Dict[str,Any]], List[Tuple[str,str,str,str]]]:
     if not csv_text.strip():
@@ -155,19 +171,11 @@ def load_filters_csv_from_str(csv_text: str) -> Tuple[List[Dict[str,Any]], List[
         applicable = (row.get('applicable_if') or "True").strip().strip("'").strip('"')
         expr = (row.get('expression') or "False").strip().strip("'").strip('"')
         enabled = _enabled_value(row.get('enabled',''))
-
         try:
-            ast.parse(f"({applicable})", mode='eval'); app_code = compile(applicable, '<app>', 'eval')
+            app_code, expr_code = _compile_row(fid, name, applicable, expr)
         except Exception as e:
-            bad.append((fid, name, f"applicable_if parse: {e.__class__.__name__}: {e}", applicable))
+            bad.append((fid, name, f"parse/compile: {e.__class__.__name__}: {e}", f"{applicable} || {expr}"))
             continue
-
-        try:
-            ast.parse(f"({expr})", mode='eval'); expr_code = compile(expr, '<expr>', 'eval')
-        except Exception as e:
-            bad.append((fid, name, f"expression parse: {e.__class__.__name__}: {e}", expr))
-            continue
-
         out.append({"id":fid, "name":name, "enabled":enabled,
                     "app_code":app_code, "expr_code":expr_code,
                     "raw_app":applicable, "raw_expr":expr})
@@ -183,6 +191,7 @@ def load_filters_csv(file) -> Tuple[List[Dict[str,Any]], List[Tuple[str,str,str,
 filters_csv, syntactic_skips = (load_filters_csv(filt_file) if filt_file
                                 else load_filters_csv_from_str(pasted_filters_csv))
 
+# Optional ID restriction
 applicable_ids = set()
 if ids_text.strip():
     applicable_ids = {t.strip().upper() for t in re.split(r"[,\s]+", ids_text) if t.strip()}
@@ -190,11 +199,12 @@ if applicable_ids:
     filters_csv = [r for r in filters_csv if r["id"].upper() in applicable_ids]
 
 # ───────────────────────────────────────────────────────────────────────────────
-# 4) Parse history + triples
+# 4) Parse history + winner←seed triples
 def _read_history(file) -> List[str]:
     if not file: return []
     body = file.read().decode("utf-8", errors="ignore")
     file.seek(0)
+    # csv or txt: scan all 5-digit tokens
     digs = re.findall(r"\b\d{5}\b", body)
     return digs
 
@@ -211,7 +221,7 @@ def _winner_triples(arr: List[str]) -> List[Tuple[str,str,str]]:
 triples = _winner_triples(raw_hist)
 
 # ───────────────────────────────────────────────────────────────────────────────
-# 5) Context generator
+# 5) Context generator – mirrors tester page names
 def gen_ctx_for_combo(seed:str, prev:str, prev2:str, combo:str,
                       hot=None, cold=None, due=None):
     seed_digits = [int(x) for x in seed]
@@ -260,14 +270,15 @@ def gen_ctx_for_combo(seed:str, prev:str, prev2:str, combo:str,
         "sum_category": sum_category, "structure_of": structure_of,
         "Counter": Counter,
 
+        # Defaults so filters referencing these never crash
         "hot_digits": list(hot) if hot is not None else [],
         "cold_digits": list(cold) if cold is not None else [],
-        "due_digits": list(due) if hot is not None else [],
+        "due_digits": list(due) if due is not None else [],  # FIXED: use 'due' not 'hot'
     }
     return ctx
 
 # ───────────────────────────────────────────────────────────────────────────────
-# 6) Compile status
+# 6) Compile status table
 st.subheader("ID Status (requested list)")
 st.caption(f"Compiled (syntax OK): {len(filters_csv)} | Skipped (syntax errors): {len(syntactic_skips)}.")
 
@@ -282,12 +293,13 @@ with st.expander("Skipped rows (reason + expression)", expanded=False):
     else:
         st.write("No syntax errors.")
 
+# Guardrail: need CSV + history + pool
 if not (filters_csv and triples and pool):
     st.info("Load/paste CSV + history + pool (and optionally paste applicable IDs), then click Compute / Rebuild.")
     st.stop()
 
 # ───────────────────────────────────────────────────────────────────────────────
-# 7) Metrics
+# 7) Metrics (similar seeds) + trim scoring
 def wilson_ci(k, n, z=1.96):
     if n==0: return (0.0, 0.0, 0.0)
     p = k/n
@@ -302,8 +314,10 @@ def filter_fires(row, ctx) -> bool:
             return False
         return bool(_eval(row["expr_code"], ctx))
     except Exception:
+        # At runtime we still guard; if anything explodes, treat as NOT firing.
         return False
 
+# Current triple (allow override)
 latest_seed = raw_hist[-1]
 prev1 = raw_hist[-2] if len(raw_hist) >= 2 else raw_hist[-1]
 prev2 = raw_hist[-3] if len(raw_hist) >= 3 else raw_hist[-1]
@@ -343,9 +357,9 @@ for r in filters_csv:
         if filter_fires(r, ctx): elim += 1
     elim_rate = elim / max(1, len(pool))
 
-    # WPP: in Trim-only mode we ignore 'p'; in Balanced we keep current behavior
+    # WPP: Trim-only mode ignores history survival
     if bundle_mode.startswith("Trim-only"):
-        wpp = elim_rate  # pure trimmer score
+        wpp = elim_rate
     else:
         wpp = p * elim_rate
 
@@ -444,7 +458,7 @@ if selected:
         st.write(f"Projected winner survival (product model): {bundle_keep_est(selected):.2%}")
     st.write(f"Projected survivors (pool): {final_n}")
 else:
-    st.info("No bundle found that satisfies the constraints. Try Trim-only or lower the survival threshold.")
+    st.info("No bundle found that satisfies the constraints. Try Trim-only, lower survival threshold, or raise max bundle size.")
 
 colL, colR = st.columns(2)
 with colL:
