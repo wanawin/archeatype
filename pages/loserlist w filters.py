@@ -1,8 +1,6 @@
-
-# loserlist_w_filters_builder.py (v3)
-# Restores default 15‑column filter creation (id,name,enabled,applicable_if,expression + 10 empties)
-# Keeps UNION_DIGITS/UNION2 macro fixes and adds the "Build" button.
-import io, re
+# loserlist_w_filters_builder.py (v4)
+# Hardened 15-column CSV writer (quotes ALL fields) to keep tester happy.
+import io, re, csv
 from typing import Dict, List, Set
 from collections import Counter
 import pandas as pd
@@ -163,6 +161,9 @@ def compute_numeric_context(last13: List[str], last20_opt: List[str]) -> Dict:
     )
 
 # ---------- resolver ----------
+def fmt_digits_list(xs: List[str]) -> str:
+    return "[" + ",".join(str(int(d)) for d in xs) + "]"
+
 def resolve_expression(expr: str, ctx: Dict) -> str:
     x = (normalize_quotes(expr or "")).strip()
     x = re.sub(r"'([0-9])'", r"\1", x)
@@ -222,27 +223,32 @@ def resolve_expression(expr: str, ctx: Dict) -> str:
 # ---------- builders ----------
 FULL15_HEADERS = ['id','name','enabled','applicable_if','expression'] + [f'Unnamed: {i}' for i in range(5,15)]
 
-def build_3col_from_paste(pasted_text: str, ctx: Dict) -> pd.DataFrame:
-    df3 = to_three_cols(_read_csv_loose(pasted_text))
-    resolved_expr = [resolve_expression(expr=r["expression"], ctx=ctx) for _, r in df3.iterrows()]
-    return pd.DataFrame({"name": df3["name"], "description": df3["description"], "expression": resolved_expr})
-
-def build_full15_from_paste(pasted_text: str, ctx: Dict) -> pd.DataFrame:
+def build_full15_from_paste_text(pasted_text: str, ctx: Dict) -> pd.DataFrame:
     df3 = to_three_cols(_read_csv_loose(pasted_text))
     exprs = [resolve_expression(expr=r["expression"], ctx=ctx) for _, r in df3.iterrows()]
     full = pd.DataFrame({
-        'id': df3['name'],              # filter ID
-        'name': df3['description'],     # human-friendly name
+        'id': df3['name'].astype(str),              # filter ID
+        'name': df3['description'].astype(str),     # human-friendly name
         'enabled': 'TRUE',
         'applicable_if': '',
-        'expression': exprs
+        'expression': pd.Series(exprs, dtype=str)
     })
     for i in range(5,15):
         full[f'Unnamed: {i}'] = ''
-    return full[FULL15_HEADERS]
+    full = full[FULL15_HEADERS].astype(str)
+    return full
+
+def to_csv_quoted_all(df: pd.DataFrame) -> str:
+    """Return CSV text with ALL fields quoted to avoid downstream NaN casting."""
+    output = io.StringIO()
+    writer = csv.writer(output, quoting=csv.QUOTE_ALL, lineterminator="\n")
+    writer.writerow(df.columns.tolist())
+    for _, row in df.iterrows():
+        writer.writerow([("" if v is None else str(v)) for v in row.tolist()])
+    return output.getvalue()
 
 # ---------- UI ----------
-st.title("⚡ Loser List → Tester-ready Export")
+st.title("⚡ Loser List → Tester-ready Export (Hardened 15-col Output)")
 
 with st.form("winners_form"):
     winners_text  = st.text_area("13 winners (Most Recent → Oldest)", key="winners_text", height=120)
@@ -266,31 +272,17 @@ if compute:
 if "ctx" in st.session_state:
     ctx = st.session_state["ctx"]
     st.markdown("---")
-    st.subheader("CSV → Filter Files")
+    st.subheader("CSV → 15-column Filter File")
     mega_csv = st.text_area("Paste filters CSV (3-col or 5-col)", height=220, key="mega_csv",
-                            help="ID/Name/Expression lines, or 5‑col.")
-    c1, c2 = st.columns(2)
-    with c1:
-        if st.button("Build 15‑column CSV", type="primary"):
-            try:
-                df15 = build_full15_from_paste(mega_csv or "", ctx)
-                csv_text = df15.to_csv(index=False)
-                st.markdown("**15‑column (with 10 trailing empty columns)**")
-                st.code(csv_text, language="csv")
-                st.download_button("Download 15‑column CSV", data=csv_text.encode("utf-8"),
-                                   file_name="filters_15col.csv", mime="text/csv", key="dl15")
-            except Exception as e:
-                st.error(str(e))
-    with c2:
-        if st.button("Build 3‑column Tester CSV"):
-            try:
-                df3 = build_3col_from_paste(mega_csv or "", ctx)
-                csv_text3 = df3.to_csv(index=False)
-                st.markdown("**3‑column Tester CSV**")
-                st.code(csv_text3, language="csv")
-                st.download_button("Download 3‑column Tester CSV", data=csv_text3.encode("utf-8"),
-                                   file_name="filters_for_tester.csv", mime="text/csv", key="dl3")
-            except Exception as e:
-                st.error(str(e))
+                            help="ID/Name/Expression lines, or 5-col. Output is always 15 columns, quoted.")
+    if st.button("Build 15-column CSV", type="primary"):
+        try:
+            df15 = build_full15_from_paste_text(mega_csv or "", ctx)
+            csv_text = to_csv_quoted_all(df15)  # QUOTE_ALL to keep tester parsing stable
+            st.code(csv_text, language="csv")
+            st.download_button("Download 15-column CSV", data=csv_text.encode("utf-8"),
+                               file_name="filters_15col.csv", mime="text/csv", key="dl15v4")
+        except Exception as e:
+            st.error(str(e))
 else:
     st.info("Enter winners and click **Compute** first.")
