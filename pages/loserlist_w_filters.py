@@ -238,7 +238,8 @@ def to_three_cols(df: pd.DataFrame) -> pd.DataFrame:
     raise ValueError("CSV must be 3-col (name,description,expression) or 5-col (id,name,enabled,applicable_if,expression).")
 
 def fmt_list(xs: List[str]) -> str:
-    return "[" + ",".join(str(int(d)) for d in xs) + "]"
+    # Emit digits as STRINGS so membership with combo_digits (strings) works
+    return "[" + ",".join(f"'{str(int(d))}'" for d in xs) + "]"
 
 # -----------------------------
 # Resolver
@@ -246,8 +247,8 @@ def fmt_list(xs: List[str]) -> str:
 def resolve_expression(expr: str, ctx: Dict) -> str:
     x = (normalize_quotes(expr or "")).strip()
 
-    # quoted digits → bare ints
-    x = re.sub(r"'([0-9])'", r"\1", x)
+    # NOTE: DO NOT strip quotes to ints here — we want lists like ['5','0'] to remain quoted
+    # x = re.sub(r"'([0-9])'", r"\1", x)  # ← removed on purpose
 
     # digit_current_letters[var] in ['A','B',...']  --> var in [digit list]
     pat_letters_membership = re.compile(
@@ -268,7 +269,7 @@ def resolve_expression(expr: str, ctx: Dict) -> str:
         allowed = fmt_list(ctx["prev_core_currentmap_digits"])
         x = pat_in_prev_core.sub(lambda m: f"{m.group(1)} in {allowed}", x)
 
-    # Base list variables (both “in var” and bare “var”)
+    # Base list variables (we replace ONLY membership occurrences to avoid list-of-lists)
     list_vars = {
         "cooled_digits":      ctx["cooled_digits"],
         "new_core_digits":    ctx["new_core_digits"],
@@ -315,11 +316,11 @@ def resolve_expression(expr: str, ctx: Dict) -> str:
         "UNION_DIGITS":       ctx.get("union_digits", []),
     }
 
-    # do the replacements
+    # Replace ONLY membership cases; never bare-name replacement (prevents [[...]])
     for name, arr in list_vars.items():
         lit = fmt_list(arr)
-        x = re.sub(rf"\bin\s+{name}\b", " in " + lit, x)
-        x = re.sub(rf"\b{name}\b", lit, x)
+        x = re.sub(rf"\bin\s+{name}\b",      " in " + lit, x)
+        x = re.sub(rf"\bnot\s+in\s+{name}\b"," not in " + lit, x)
 
     # Letter-set contains → True/False
     def letter_contains(txt: str, varname: str, letters: Set[str]) -> str:
