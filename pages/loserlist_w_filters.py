@@ -1,5 +1,5 @@
 # Loser List (Least → Most Likely) — Tester-ready Export
-# (with heat maps, loser lists, safe resolver, and UNI/carry fixes)
+# (with heat maps, loser lists, safe resolver, and UNI/carry fixes — minimal edits)
 
 import io, re
 from typing import Dict, List, Set, Tuple
@@ -131,24 +131,19 @@ def loser_list(last13: List[str]) -> Tuple[List[str], Dict]:
         "core_size_in_235": core_size in {2,3,5},
     }
 
-    # ---------- UNI / carry definitions ----------
-    # seed+1 (mod 10), top-2 carry from last two draws, and their union
-    seedp1 = sorted({str((int(d) + 1) % 10) for d in seed_digits}, key=int)
-
+    # ---------- UNI / carry definitions (minimal additions) ----------
+    seedp1 = sorted({str((int(d) + 1) % 10) for d in seed_digits}, key=int)  # seed+1 set
     counts_last2 = Counter(prev_digits + prev2_digits)
     for d in DIGITS:
         counts_last2.setdefault(d, 0)
     carry2_order = sorted(DIGITS, key=lambda d: (-counts_last2[d], int(d)))
-    carry2 = carry2_order[:2]
+    carry2 = carry2_order[:2]  # top-2 carry
+    union2 = sorted(set(carry2) | set(seedp1), key=int)  # carry2 ∪ seedp1
 
-    union2 = sorted(set(carry2) | set(seedp1), key=int)
-
-    # positional single-digit lists for seed and seed+1
-    seed_pos  = [seed_digits[i] for i in range(5)]
-    p1_pos    = [str((int(x) + 1) % 10) for x in seed_pos]
-    # union of seed and seed+1 (set)
-    union_digits = sorted(set(seed_pos) | set(p1_pos), key=int)
-    # -------------------------------------------------------
+    seed_pos  = [seed_digits[i] for i in range(5)]                     # s1..s5
+    p1_pos    = [str((int(x) + 1) % 10) for x in seed_pos]             # p2..p5 helpers
+    union_digits = sorted(set(seed_pos) | set(p1_pos), key=int)        # seed ∪ (seed+1)
+    # ---------------------------------------------------------------
 
     ctx = dict(
         # basic sets
@@ -171,12 +166,17 @@ def loser_list(last13: List[str]) -> Tuple[List[str], Dict]:
         seed_sum=seed_sum, prev_sum=prev_sum, core_size_flags=core_size_flags,
 
         # NEW exposed lists used by your filters
-        seedp1=seedp1,          # seed + 1 (set)
-        carry2=carry2,          # top-2 carry (last-2 draws frequency)
-        union2=union2,          # carry2 ∪ seedp1
-        seed_pos=seed_pos,      # positional seed digits
-        p1_pos=p1_pos,          # positional seed+1 digits
-        union_digits=union_digits,  # seed ∪ seed+1
+        seedp1=seedp1,                 # seed + 1 (set)
+        seed_plus1=seedp1,             # alias
+        seed_plus_1=seedp1,            # alias
+        carry2=carry2,                 # top-2 carry
+        carry_top2=carry2,             # alias
+        union2=union2,                 # carry2 ∪ seedp1
+        UNION2=union2,                 # alias for membership expressions
+        seed_pos=seed_pos,             # positional seed digits
+        p1_pos=p1_pos,                 # positional seed+1 digits
+        union_digits=union_digits,     # seed ∪ seed+1
+        UNION_DIGITS=union_digits,     # alias
 
         # heat maps for UI
         current_map_order="".join(info_curr["order"]),
@@ -242,25 +242,27 @@ def to_three_cols(df: pd.DataFrame) -> pd.DataFrame:
     raise ValueError("CSV must be 3-col (name,description,expression) or 5-col (id,name,enabled,applicable_if,expression).")
 
 # -----------------------------
-# Resolver
+# Resolver — minimal edits to translate names + flatten lists
 # -----------------------------
 def resolve_expression(expr: str, ctx: Dict) -> str:
     """
     Convert macro names in `expr` to concrete Python list literals and
-    normalize operators. We ONLY replace membership expressions
-    (`in NAME` / `not in NAME`) or flatten bracketed name lists.
+    normalize operators. We replace:
+      • tuple/bracket name lists: (s1,s2,p1) or [s1,s2,p1] → ['…','…']
+      • membership:  in NAME / not in NAME (no bare-name replacement)
     """
     x = (normalize_quotes(expr or "")).strip()
 
-    # variables exposed to expressions — keep your existing ones, add UNI lists
+    # variables exposed to expressions — ONLY what your filters need
+    # include lower+UPPER aliases to avoid misses
     list_vars = {
+        # existing sets
         "cooled_digits":      ctx["cooled_digits"],
         "new_core_digits":    ctx["new_core_digits"],
         "loser_7_9":          ctx["loser_7_9"],
         "ring_digits":        ctx["ring_digits"],
         "hot7_last10":        ctx["hot7_last10"],
         "hot7_last20":        ctx.get("hot7_last20", []),
-
         "seed_digits":        ctx["seed_digits"],
         "prev_digits":        ctx["prev_digits"],
         "prev_mirror_digits": ctx["prev_mirror_digits"],
@@ -270,79 +272,83 @@ def resolve_expression(expr: str, ctx: Dict) -> str:
         "edge_AC":            ctx["edge_AC"],
         "edge_HJ":            ctx["edge_HJ"],
 
-        # shorthand positional + seed+1
-        "s1": [ctx["seed_pos"][0]],
-        "s2": [ctx["seed_pos"][1]],
-        "s3": [ctx["seed_pos"][2]],
-        "s4": [ctx["seed_pos"][3]],
-        "s5": [ctx["seed_pos"][4]],
+        # positional seed (s1..s5) lower + UPPER
+        "s1": [ctx["seed_pos"][0]], "S1": [ctx["seed_pos"][0]],
+        "s2": [ctx["seed_pos"][1]], "S2": [ctx["seed_pos"][1]],
+        "s3": [ctx["seed_pos"][2]], "S3": [ctx["seed_pos"][2]],
+        "s4": [ctx["seed_pos"][3]], "S4": [ctx["seed_pos"][3]],
+        "s5": [ctx["seed_pos"][4]], "S5": [ctx["seed_pos"][4]],
 
-        "p1":                 ctx.get("seedp1", []),  # full seed+1 set
-        "p2":                [ctx["p1_pos"][1]],
-        "p3":                [ctx["p1_pos"][2]],
-        "p4":                [ctx["p1_pos"][3]],
-        "p5":                [ctx["p1_pos"][4]],
+        # seed+1 forms (p1 full set + p2..p5 singletons) lower + UPPER
+        "p1": ctx.get("seedp1", []), "P1": ctx.get("seedp1", []),
+        "p2": [ctx["p1_pos"][1]],    "P2": [ctx["p1_pos"][1]],
+        "p3": [ctx["p1_pos"][2]],    "P3": [ctx["p1_pos"][2]],
+        "p4": [ctx["p1_pos"][3]],    "P4": [ctx["p1_pos"][3]],
+        "p5": [ctx["p1_pos"][4]],    "P5": [ctx["p1_pos"][4]],
+        "seedp1": ctx.get("seedp1", []), "SEEDP1": ctx.get("seedp1", []),
+        "seed_plus1": ctx.get("seed_plus1", []), "SEED_PLUS1": ctx.get("seed_plus1", []),
+        "seed_plus_1": ctx.get("seed_plus_1", []), "SEED_PLUS_1": ctx.get("seed_plus_1", []),
 
-        # carry and unions
-        "c1":                 ctx.get("carry2", []),
-        "c2":                 ctx.get("carry2", []),
-        "u1":                 ctx.get("union2", []),
-        "u2":                 ctx.get("union2", []),
-        "u3":                 ctx.get("union2", []),
-        "u4":                 ctx.get("union2", []),
-        "u5":                 ctx.get("union2", []),
-        "u6":                 ctx.get("union2", []),
-        "u7":                 ctx.get("union2", []),
+        # carry and unions (c1,c2,u1..u7) + aliases + UPPER
+        "c1": ctx.get("carry2", []), "C1": ctx.get("carry2", []),
+        "c2": ctx.get("carry2", []), "C2": ctx.get("carry2", []),
+        "u1": ctx.get("union2", []), "U1": ctx.get("union2", []),
+        "u2": ctx.get("union2", []), "U2": ctx.get("union2", []),
+        "u3": ctx.get("union2", []), "U3": ctx.get("union2", []),
+        "u4": ctx.get("union2", []), "U4": ctx.get("union2", []),
+        "u5": ctx.get("union2", []), "U5": ctx.get("union2", []),
+        "u6": ctx.get("union2", []), "U6": ctx.get("union2", []),
+        "u7": ctx.get("union2", []), "U7": ctx.get("union2", []),
+        "union2": ctx.get("union2", []), "UNION2": ctx.get("union2", []),
 
         # uppercase union (seed ∪ seed+1)
-        "UNION_DIGITS":       ctx.get("union_digits", []),
+        "union_digits": ctx.get("union_digits", []),
+        "UNION_DIGITS": ctx.get("UNION_DIGITS", []),
     }
 
     def fmt_digits_list(xs: List[str]) -> str:
         return "[" + ",".join(f"'{str(int(d))}'" for d in xs) + "]"
 
-    # --- 1) Flatten bracketed name lists, e.g., [s1,s2,p1] -> ['x','y','z'] ---
-    # Supports digits or quoted digits mixed with names.
-    def _flatten_bracketed(m):
-        inner = m.group(1)
+    # --- Flatten tuple/bracket name lists: (s1,s2,p1) / [s1,s2,p1] ---
+    def _flatten_name_list(inner: str) -> str:
         parts = [p.strip() for p in inner.split(",") if p.strip()]
-        flat: List[str] = []
+        flat, seen = [], set()
         for p in parts:
-            # quoted digit?
-            if (len(p) >= 3) and ((p[0] == p[-1] == "'") or (p[0] == p[-1] == '"')):
+            # quoted digit like '5' or "7"
+            if (len(p) >= 3) and (p[0] == p[-1]) and (p[0] in "'\""):
                 val = p[1:-1].strip()
-                if val.isdigit() and len(val) == 1:
-                    flat.append(val)
-                else:
-                    # leave as-is if weird
-                    pass
-            elif p in list_vars:
-                flat.extend(list_vars[p])
-            else:
-                # bare digit?
-                if p.isdigit() and len(p) == 1:
-                    flat.append(p)
-                # otherwise ignore unknown symbol to avoid syntax explosions
-        # de-dup but stable
-        seen = set()
-        uniq = []
-        for d in flat:
-            if d not in seen:
-                seen.add(d)
-                uniq.append(d)
-        return fmt_digits_list(uniq)
+                if len(val) == 1 and val.isdigit() and val not in seen:
+                    seen.add(val); flat.append(val)
+                continue
+            # bare digit
+            if len(p) == 1 and p.isdigit():
+                if p not in seen:
+                    seen.add(p); flat.append(p)
+                continue
+            # named list from list_vars (e.g., s1, p1, u3, c2, UNION_DIGITS)
+            if p in list_vars:
+                for d in list_vars[p]:
+                    if d not in seen:
+                        seen.add(d); flat.append(d)
+                continue
+            # unknown token: ignore silently
+        return fmt_digits_list(flat)
 
-    x = re.sub(r"\[(.*?)\]", _flatten_bracketed, x)
+    # replace tuple-style and bracket-style membership first
+    x = re.sub(r"\bnot\s+in\s*\(([^)]+)\)", lambda m: " not in " + _flatten_name_list(m.group(1)), x)
+    x = re.sub(r"\bin\s*\(([^)]+)\)",      lambda m: " in "     + _flatten_name_list(m.group(1)), x)
+    x = re.sub(r"\bnot\s+in\s*\[([^\]]+)\]", lambda m: " not in " + _flatten_name_list(m.group(1)), x)
+    x = re.sub(r"\bin\s*\[([^\]]+)\]",      lambda m: " in "     + _flatten_name_list(m.group(1)), x)
 
-    # --- 2) Replace membership for NAME and (NAME) forms ---
+    # Replace ONLY membership cases; never bare-name replacement (prevents [[...]])
     for name, arr in list_vars.items():
         lit = fmt_digits_list(arr)
-        x = re.sub(rf"\bin\s+{name}\b",      " in " + lit, x)
-        x = re.sub(rf"\bnot\s+in\s+{name}\b"," not in " + lit, x)
-        x = re.sub(rf"\bin\s*\(\s*{name}\s*\)",      " in " + lit, x)
+        x = re.sub(rf"\bin\s+{name}\b",       " in " + lit, x)
+        x = re.sub(rf"\bnot\s+in\s+{name}\b", " not in " + lit, x)
+        x = re.sub(rf"\bin\s*\(\s*{name}\s*\)",       " in " + lit, x)
         x = re.sub(rf"\bnot\s+in\s*\(\s*{name}\s*\)", " not in " + lit, x)
 
-    # --- 3) Letter-set contains → True/False (if present) ---
+    # Letter-set contains → True/False (if present)
     def letter_contains(txt: str, varname: str, letters: Set[str]) -> str:
         p = re.compile(r"'([A-J])'\s+in\s+" + re.escape(varname))
         return p.sub(lambda mm: "True" if mm.group(1) in letters else "False", txt)
@@ -350,7 +356,7 @@ def resolve_expression(expr: str, ctx: Dict) -> str:
     x = letter_contains(x, "prev_core_letters", set(ctx["prev_core_letters"]))
     x = letter_contains(x, "core_letters",      set(ctx["curr_core_letters"]))
 
-    # --- 4) Scalar sums and core-size flags (if referenced) ---
+    # Scalar sums and core-size flags
     x = re.sub(r"\bseed_sum\b", str(ctx.get("seed_sum", 0)), x)
     x = re.sub(r"\bprev_sum\b", str(ctx.get("prev_sum", 0)), x)
     for key, val in (ctx.get("core_size_flags") or {}).items():
