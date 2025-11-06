@@ -1,5 +1,5 @@
 # Loser List (Least → Most Likely) — Tester-ready Export
-# (with heat maps, loser lists, and numbers-only resolver)
+# (with heat maps, loser lists, safe resolver, and UNI/carry fixes)
 
 import io, re
 from typing import Dict, List, Set, Tuple
@@ -57,6 +57,10 @@ def neighbors(letter: str, span: int = 1) -> List[str]:
 
 def digits_for_letters_currentmap(letters: Set[str], digit_current_letters: Dict[str,str]) -> List[str]:
     return [d for d in DIGITS if digit_current_letters.get(d) in letters]
+
+def fmt_list(xs: List[str]) -> str:
+    # Emit digits as STRINGS so membership with combo_digits (strings) works
+    return "[" + ",".join(f"'{str(int(d))}'" for d in xs) + "]"
 
 # -----------------------------
 # Core analytics (maps, lists)
@@ -127,7 +131,7 @@ def loser_list(last13: List[str]) -> Tuple[List[str], Dict]:
         "core_size_in_235": core_size in {2,3,5},
     }
 
-    # ---------- minimal NEW definitions / aliases ----------
+    # ---------- UNI / carry definitions ----------
     # seed+1 (mod 10), top-2 carry from last two draws, and their union
     seedp1 = sorted({str((int(d) + 1) % 10) for d in seed_digits}, key=int)
 
@@ -168,7 +172,7 @@ def loser_list(last13: List[str]) -> Tuple[List[str], Dict]:
 
         # NEW exposed lists used by your filters
         seedp1=seedp1,          # seed + 1 (set)
-        carry2=carry2,          # top-2 carry
+        carry2=carry2,          # top-2 carry (last-2 draws frequency)
         union2=union2,          # carry2 ∪ seedp1
         seed_pos=seed_pos,      # positional seed digits
         p1_pos=p1_pos,          # positional seed+1 digits
@@ -237,46 +241,25 @@ def to_three_cols(df: pd.DataFrame) -> pd.DataFrame:
 
     raise ValueError("CSV must be 3-col (name,description,expression) or 5-col (id,name,enabled,applicable_if,expression).")
 
-def fmt_list(xs: List[str]) -> str:
-    # Emit digits as STRINGS so membership with combo_digits (strings) works
-    return "[" + ",".join(f"'{str(int(d))}'" for d in xs) + "]"
-
 # -----------------------------
 # Resolver
 # -----------------------------
 def resolve_expression(expr: str, ctx: Dict) -> str:
+    """
+    Convert macro names in `expr` to concrete Python list literals and
+    normalize operators. We ONLY replace membership expressions
+    (`in NAME` / `not in NAME`) or flatten bracketed name lists.
+    """
     x = (normalize_quotes(expr or "")).strip()
 
-    # NOTE: DO NOT strip quotes to ints here — we want lists like ['5','0'] to remain quoted
-    # x = re.sub(r"'([0-9])'", r"\1", x)  # ← removed on purpose
-
-    # digit_current_letters[var] in ['A','B',...']  --> var in [digit list]
-    pat_letters_membership = re.compile(
-        r"digit_current_letters\s*\[\s*([A-Za-z_]\w*)\s*\]\s*in\s*\[(.*?)\]"
-    )
-    def sub_letter_membership(m):
-        var_d = m.group(1)
-        raw   = m.group(2)
-        letters_raw = [tok.strip() for tok in raw.split(",") if tok.strip()]
-        letters = [s.strip("'\"") for s in letters_raw]
-        allowed = [d for d in DIGITS if ctx["digit_current_letters"].get(d) in letters]
-        return f"{var_d} in {fmt_list(allowed)}"
-    x = pat_letters_membership.sub(sub_letter_membership, x)
-
-    # digit_current_letters[var] in prev_core_letters  --> var in [digits]
-    pat_in_prev_core = re.compile(r"digit_current_letters\s*\[\s*([A-Za-z_]\w*)\s*\]\s*in\s*prev_core_letters")
-    if ctx.get("prev_core_currentmap_digits") is not None:
-        allowed = fmt_list(ctx["prev_core_currentmap_digits"])
-        x = pat_in_prev_core.sub(lambda m: f"{m.group(1)} in {allowed}", x)
-
-    # Base list variables (we replace ONLY membership occurrences to avoid list-of-lists)
+    # variables exposed to expressions — keep your existing ones, add UNI lists
     list_vars = {
         "cooled_digits":      ctx["cooled_digits"],
         "new_core_digits":    ctx["new_core_digits"],
         "loser_7_9":          ctx["loser_7_9"],
         "ring_digits":        ctx["ring_digits"],
         "hot7_last10":        ctx["hot7_last10"],
-        "hot7_last20":        ctx.get("hot7_last20", []),  # NEW
+        "hot7_last20":        ctx.get("hot7_last20", []),
 
         "seed_digits":        ctx["seed_digits"],
         "prev_digits":        ctx["prev_digits"],
@@ -287,21 +270,20 @@ def resolve_expression(expr: str, ctx: Dict) -> str:
         "edge_AC":            ctx["edge_AC"],
         "edge_HJ":            ctx["edge_HJ"],
 
-        # Shorthand sets/aliases in your filters
-        "s1": [ctx["seed_pos"][0]],  # positional seed digits
+        # shorthand positional + seed+1
+        "s1": [ctx["seed_pos"][0]],
         "s2": [ctx["seed_pos"][1]],
         "s3": [ctx["seed_pos"][2]],
         "s4": [ctx["seed_pos"][3]],
         "s5": [ctx["seed_pos"][4]],
 
-        # Keep p1 = full seed+1 SET; p2..p5 = positional seed+1 singletons
-        "p1":                 ctx.get("seedp1", []),
+        "p1":                 ctx.get("seedp1", []),  # full seed+1 set
         "p2":                [ctx["p1_pos"][1]],
         "p3":                [ctx["p1_pos"][2]],
         "p4":                [ctx["p1_pos"][3]],
         "p5":                [ctx["p1_pos"][4]],
 
-        # carry/union aliases
+        # carry and unions
         "c1":                 ctx.get("carry2", []),
         "c2":                 ctx.get("carry2", []),
         "u1":                 ctx.get("union2", []),
@@ -312,17 +294,55 @@ def resolve_expression(expr: str, ctx: Dict) -> str:
         "u6":                 ctx.get("union2", []),
         "u7":                 ctx.get("union2", []),
 
-        # Uppercase union of seed and seed+1 (used by UNI2/UNI3)
+        # uppercase union (seed ∪ seed+1)
         "UNION_DIGITS":       ctx.get("union_digits", []),
     }
 
-    # Replace ONLY membership cases; never bare-name replacement (prevents [[...]])
+    def fmt_digits_list(xs: List[str]) -> str:
+        return "[" + ",".join(f"'{str(int(d))}'" for d in xs) + "]"
+
+    # --- 1) Flatten bracketed name lists, e.g., [s1,s2,p1] -> ['x','y','z'] ---
+    # Supports digits or quoted digits mixed with names.
+    def _flatten_bracketed(m):
+        inner = m.group(1)
+        parts = [p.strip() for p in inner.split(",") if p.strip()]
+        flat: List[str] = []
+        for p in parts:
+            # quoted digit?
+            if (len(p) >= 3) and ((p[0] == p[-1] == "'") or (p[0] == p[-1] == '"')):
+                val = p[1:-1].strip()
+                if val.isdigit() and len(val) == 1:
+                    flat.append(val)
+                else:
+                    # leave as-is if weird
+                    pass
+            elif p in list_vars:
+                flat.extend(list_vars[p])
+            else:
+                # bare digit?
+                if p.isdigit() and len(p) == 1:
+                    flat.append(p)
+                # otherwise ignore unknown symbol to avoid syntax explosions
+        # de-dup but stable
+        seen = set()
+        uniq = []
+        for d in flat:
+            if d not in seen:
+                seen.add(d)
+                uniq.append(d)
+        return fmt_digits_list(uniq)
+
+    x = re.sub(r"\[(.*?)\]", _flatten_bracketed, x)
+
+    # --- 2) Replace membership for NAME and (NAME) forms ---
     for name, arr in list_vars.items():
-        lit = fmt_list(arr)
+        lit = fmt_digits_list(arr)
         x = re.sub(rf"\bin\s+{name}\b",      " in " + lit, x)
         x = re.sub(rf"\bnot\s+in\s+{name}\b"," not in " + lit, x)
+        x = re.sub(rf"\bin\s*\(\s*{name}\s*\)",      " in " + lit, x)
+        x = re.sub(rf"\bnot\s+in\s*\(\s*{name}\s*\)", " not in " + lit, x)
 
-    # Letter-set contains → True/False
+    # --- 3) Letter-set contains → True/False (if present) ---
     def letter_contains(txt: str, varname: str, letters: Set[str]) -> str:
         p = re.compile(r"'([A-J])'\s+in\s+" + re.escape(varname))
         return p.sub(lambda mm: "True" if mm.group(1) in letters else "False", txt)
@@ -330,11 +350,9 @@ def resolve_expression(expr: str, ctx: Dict) -> str:
     x = letter_contains(x, "prev_core_letters", set(ctx["prev_core_letters"]))
     x = letter_contains(x, "core_letters",      set(ctx["curr_core_letters"]))
 
-    # Scalar sums
+    # --- 4) Scalar sums and core-size flags (if referenced) ---
     x = re.sub(r"\bseed_sum\b", str(ctx.get("seed_sum", 0)), x)
     x = re.sub(r"\bprev_sum\b", str(ctx.get("prev_sum", 0)), x)
-
-    # Core-size flags
     for key, val in (ctx.get("core_size_flags") or {}).items():
         x = re.sub(rf"\b{re.escape(key)}\b", "True" if val else "False", x)
 
@@ -355,7 +373,7 @@ def resolve_text_placeholders(text: str, ctx: Dict) -> str:
         "{SEEDP1}":             fmt_list(ctx.get("seedp1", [])),
         "{CARRY2}":             fmt_list(ctx.get("carry2", [])),
         "{UNION2}":             fmt_list(ctx.get("union2", [])),
-        "{UNION_DIGITS}":       fmt_list(ctx.get("union_digits", [])),  # NEW
+        "{UNION_DIGITS}":       fmt_list(ctx.get("union_digits", [])),
     }
     for k, v in repls.items():
         t = t.replace(k, v)
