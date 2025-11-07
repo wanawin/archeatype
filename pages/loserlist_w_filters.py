@@ -1,5 +1,5 @@
 # Loser List (Least → Most Likely) — Tester-ready Export
-# (with heat maps, loser lists, safe resolver, and UNI/carry fixes — minimal edits)
+# (INT-safe membership output for Filter Tracker; minimal edits)
 
 import io, re
 from typing import Dict, List, Set, Tuple
@@ -58,9 +58,12 @@ def neighbors(letter: str, span: int = 1) -> List[str]:
 def digits_for_letters_currentmap(letters: Set[str], digit_current_letters: Dict[str,str]) -> List[str]:
     return [d for d in DIGITS if digit_current_letters.get(d) in letters]
 
+# >>> INT-safe emitters (changed): emit sets of INTS so int(d) membership works everywhere
 def fmt_list(xs: List[str]) -> str:
-    # Emit digits as STRINGS so membership with combo_digits (strings) works
-    return "[" + ",".join(f"'{str(int(d))}'" for d in xs) + "]"
+    return "{" + ",".join(str(int(d)) for d in xs) + "}"
+
+def fmt_digits_list(xs: List[str]) -> str:
+    return "{" + ",".join(str(int(d)) for d in xs) + "}"
 
 # -----------------------------
 # Core analytics (maps, lists)
@@ -88,15 +91,13 @@ def loser_list(last13: List[str]) -> Tuple[List[str], Dict]:
     rows = [list(s) for s in last13]
     info_prev, info_curr = compute_maps(last13)
 
-    # Most-recent draw
-    seed_digits = rows[0]          # list[str] len=5
+    seed_digits = rows[0]     # most recent 5
     prev_digits = rows[1]
     prev2_digits = rows[2] if len(rows) > 2 else []
 
     digit_prev_letters  = info_prev["digit_letters"]
     digit_curr_letters  = info_curr["digit_letters"]
 
-    # Previous-map core letters based on MR digits
     prev_core_letters = sorted({digit_prev_letters[d] for d in seed_digits},
                                key=lambda L: LETTERS.index(L))
 
@@ -131,60 +132,45 @@ def loser_list(last13: List[str]) -> Tuple[List[str], Dict]:
         "core_size_in_235": core_size in {2,3,5},
     }
 
-    # ---------- UNI / carry definitions (minimal additions) ----------
-    seedp1 = sorted({str((int(d) + 1) % 10) for d in seed_digits}, key=int)  # seed+1 set
+    # carry/union/seed+1 sets
+    seedp1 = sorted({str((int(d) + 1) % 10) for d in seed_digits}, key=int)
     counts_last2 = Counter(prev_digits + prev2_digits)
     for d in DIGITS:
         counts_last2.setdefault(d, 0)
     carry2_order = sorted(DIGITS, key=lambda d: (-counts_last2[d], int(d)))
-    carry2 = carry2_order[:2]  # top-2 carry
-    union2 = sorted(set(carry2) | set(seedp1), key=int)  # carry2 ∪ seedp1
+    carry2 = carry2_order[:2]
+    union2 = sorted(set(carry2) | set(seedp1), key=int)
 
-    seed_pos  = [seed_digits[i] for i in range(5)]                     # s1..s5
-    p1_pos    = [str((int(x) + 1) % 10) for x in seed_pos]             # p2..p5 helpers
-    union_digits = sorted(set(seed_pos) | set(p1_pos), key=int)        # seed ∪ (seed+1)
-    # ---------------------------------------------------------------
+    seed_pos  = [seed_digits[i] for i in range(5)]
+    p1_pos    = [str((int(x) + 1) % 10) for x in seed_pos]
+    union_digits = sorted(set(seed_pos) | set(p1_pos), key=int)
 
     ctx = dict(
-        # basic sets
         seed_digits=seed_digits, prev_digits=prev_digits, prev2_digits=prev2_digits,
         prev_mirror_digits=prev_mirror_digits, union_last2=union_last2, due_last2=due_last2,
 
-        # maps
         digit_prev_letters=digit_prev_letters, digit_current_letters=digit_curr_letters,
         prev_core_letters=prev_core_letters, curr_core_letters=curr_core_letters,
         prev_core_currentmap_digits=prev_core_currentmap_digits,
 
-        # groups
         ring_digits=ring_digits, new_core_digits=new_core_digits, cooled_digits=cooled_digits,
         loser_7_9=loser_7_9, hot7_last10=hot7_last10,
 
-        # edges
         edge_AC=edge_AC, edge_HJ=edge_HJ,
 
-        # sums / flags
         seed_sum=seed_sum, prev_sum=prev_sum, core_size_flags=core_size_flags,
 
-        # NEW exposed lists used by your filters
-        seedp1=seedp1,                 # seed + 1 (set)
-        seed_plus1=seedp1,             # alias
-        seed_plus_1=seedp1,            # alias
-        carry2=carry2,                 # top-2 carry
-        carry_top2=carry2,             # alias
-        union2=union2,                 # carry2 ∪ seedp1
-        UNION2=union2,                 # alias for membership expressions
-        seed_pos=seed_pos,             # positional seed digits
-        p1_pos=p1_pos,                 # positional seed+1 digits
-        union_digits=union_digits,     # seed ∪ seed+1
-        UNION_DIGITS=union_digits,     # alias
+        seedp1=seedp1, seed_plus1=seedp1, seed_plus_1=seedp1,
+        carry2=carry2, carry_top2=carry2,
+        union2=union2, UNION2=union2,
 
-        # heat maps for UI
+        seed_pos=seed_pos, p1_pos=p1_pos,
+        union_digits=union_digits, UNION_DIGITS=union_digits,
+
         current_map_order="".join(info_curr["order"]),
         previous_map_order="".join(info_prev["order"]),
-        current_counts=info_curr["counts"],
-        previous_counts=info_prev["counts"],
-        current_rank=info_curr["rank"],
-        previous_rank=info_prev["rank"],
+        current_counts=info_curr["counts"], previous_counts=info_prev["counts"],
+        current_rank=info_curr["rank"],   previous_rank=info_prev["rank"],
     )
 
     loser_ranking = list(reversed(info_curr["order"]))
@@ -242,21 +228,12 @@ def to_three_cols(df: pd.DataFrame) -> pd.DataFrame:
     raise ValueError("CSV must be 3-col (name,description,expression) or 5-col (id,name,enabled,applicable_if,expression).")
 
 # -----------------------------
-# Resolver — minimal edits to translate names + flatten lists
+# Resolver — INT-safe membership injection (minimal edits)
 # -----------------------------
 def resolve_expression(expr: str, ctx: Dict) -> str:
-    """
-    Convert macro names in `expr` to concrete Python list literals and
-    normalize operators. We replace:
-      • tuple/bracket name lists: (s1,s2,p1) or [s1,s2,p1] → ['…','…']
-      • membership:  in NAME / not in NAME (no bare-name replacement)
-    """
     x = (normalize_quotes(expr or "")).strip()
 
-    # variables exposed to expressions — ONLY what your filters need
-    # include lower+UPPER aliases to avoid misses
     list_vars = {
-        # existing sets
         "cooled_digits":      ctx["cooled_digits"],
         "new_core_digits":    ctx["new_core_digits"],
         "loser_7_9":          ctx["loser_7_9"],
@@ -272,14 +249,12 @@ def resolve_expression(expr: str, ctx: Dict) -> str:
         "edge_AC":            ctx["edge_AC"],
         "edge_HJ":            ctx["edge_HJ"],
 
-        # positional seed (s1..s5) lower + UPPER
         "s1": [ctx["seed_pos"][0]], "S1": [ctx["seed_pos"][0]],
         "s2": [ctx["seed_pos"][1]], "S2": [ctx["seed_pos"][1]],
         "s3": [ctx["seed_pos"][2]], "S3": [ctx["seed_pos"][2]],
         "s4": [ctx["seed_pos"][3]], "S4": [ctx["seed_pos"][3]],
         "s5": [ctx["seed_pos"][4]], "S5": [ctx["seed_pos"][4]],
 
-        # seed+1 forms (p1 full set + p2..p5 singletons) lower + UPPER
         "p1": ctx.get("seedp1", []), "P1": ctx.get("seedp1", []),
         "p2": [ctx["p1_pos"][1]],    "P2": [ctx["p1_pos"][1]],
         "p3": [ctx["p1_pos"][2]],    "P3": [ctx["p1_pos"][2]],
@@ -289,7 +264,6 @@ def resolve_expression(expr: str, ctx: Dict) -> str:
         "seed_plus1": ctx.get("seed_plus1", []), "SEED_PLUS1": ctx.get("seed_plus1", []),
         "seed_plus_1": ctx.get("seed_plus_1", []), "SEED_PLUS_1": ctx.get("seed_plus_1", []),
 
-        # carry and unions (c1,c2,u1..u7) + aliases + UPPER
         "c1": ctx.get("carry2", []), "C1": ctx.get("carry2", []),
         "c2": ctx.get("carry2", []), "C2": ctx.get("carry2", []),
         "u1": ctx.get("union2", []), "U1": ctx.get("union2", []),
@@ -301,54 +275,54 @@ def resolve_expression(expr: str, ctx: Dict) -> str:
         "u7": ctx.get("union2", []), "U7": ctx.get("union2", []),
         "union2": ctx.get("union2", []), "UNION2": ctx.get("union2", []),
 
-        # uppercase union (seed ∪ seed+1)
         "union_digits": ctx.get("union_digits", []),
         "UNION_DIGITS": ctx.get("UNION_DIGITS", []),
     }
 
-    def fmt_digits_list(xs: List[str]) -> str:
-        return "[" + ",".join(f"'{str(int(d))}'" for d in xs) + "]"
+    def set_lit(xs: List[str]) -> str:
+        return "{" + ",".join(str(int(d)) for d in xs) + "}"
 
-    # --- Flatten tuple/bracket name lists: (s1,s2,p1) / [s1,s2,p1] ---
+    # Flatten tuple/bracket name lists into INT sets
     def _flatten_name_list(inner: str) -> str:
         parts = [p.strip() for p in inner.split(",") if p.strip()]
         flat, seen = [], set()
         for p in parts:
-            # quoted digit like '5' or "7"
             if (len(p) >= 3) and (p[0] == p[-1]) and (p[0] in "'\""):
                 val = p[1:-1].strip()
                 if len(val) == 1 and val.isdigit() and val not in seen:
                     seen.add(val); flat.append(val)
                 continue
-            # bare digit
             if len(p) == 1 and p.isdigit():
                 if p not in seen:
                     seen.add(p); flat.append(p)
                 continue
-            # named list from list_vars (e.g., s1, p1, u3, c2, UNION_DIGITS)
             if p in list_vars:
                 for d in list_vars[p]:
                     if d not in seen:
                         seen.add(d); flat.append(d)
                 continue
-            # unknown token: ignore silently
-        return fmt_digits_list(flat)
+        return set_lit(flat)
 
-    # replace tuple-style and bracket-style membership first
+    # Replace tuple/bracket lists first
     x = re.sub(r"\bnot\s+in\s*\(([^)]+)\)", lambda m: " not in " + _flatten_name_list(m.group(1)), x)
     x = re.sub(r"\bin\s*\(([^)]+)\)",      lambda m: " in "     + _flatten_name_list(m.group(1)), x)
     x = re.sub(r"\bnot\s+in\s*\[([^\]]+)\]", lambda m: " not in " + _flatten_name_list(m.group(1)), x)
     x = re.sub(r"\bin\s*\[([^\]]+)\]",      lambda m: " in "     + _flatten_name_list(m.group(1)), x)
 
-    # Replace ONLY membership cases; never bare-name replacement (prevents [[...]])
+    # Replace NAME membership with INT sets (no bare-name full replacement)
     for name, arr in list_vars.items():
-        lit = fmt_digits_list(arr)
+        lit = set_lit(arr)
         x = re.sub(rf"\bin\s+{name}\b",       " in " + lit, x)
         x = re.sub(rf"\bnot\s+in\s+{name}\b", " not in " + lit, x)
         x = re.sub(rf"\bin\s*\(\s*{name}\s*\)",       " in " + lit, x)
         x = re.sub(rf"\bnot\s+in\s*\(\s*{name}\s*\)", " not in " + lit, x)
 
-    # Letter-set contains → True/False (if present)
+    # >>> Ensure d is INT in generator/comprehension membership
+    x = re.sub(r"sum\(\s*1\s*for\s+d\s+in\s+combo_digits\s+if\s+d\s+(in|not in)\s+",
+               lambda m: f"sum(int(d) {m.group(1)} ", x)
+    x = re.sub(r"sum\(\s*d\s+in\s+", "sum(int(d) in ", x)
+
+    # Letter-set contains → literal bool (if present)
     def letter_contains(txt: str, varname: str, letters: Set[str]) -> str:
         p = re.compile(r"'([A-J])'\s+in\s+" + re.escape(varname))
         return p.sub(lambda mm: "True" if mm.group(1) in letters else "False", txt)
@@ -356,7 +330,6 @@ def resolve_expression(expr: str, ctx: Dict) -> str:
     x = letter_contains(x, "prev_core_letters", set(ctx["prev_core_letters"]))
     x = letter_contains(x, "core_letters",      set(ctx["curr_core_letters"]))
 
-    # Scalar sums and core-size flags
     x = re.sub(r"\bseed_sum\b", str(ctx.get("seed_sum", 0)), x)
     x = re.sub(r"\bprev_sum\b", str(ctx.get("prev_sum", 0)), x)
     for key, val in (ctx.get("core_size_flags") or {}).items():
@@ -416,7 +389,7 @@ def build_tester_csv_from_paste(pasted_text: str, ctx: Dict) -> pd.DataFrame:
     return out
 
 # -----------------------------
-# UI
+# UI (unchanged)
 # -----------------------------
 st.title("Loser List (Least → Most Likely) — Tester-ready Export")
 
@@ -468,8 +441,8 @@ def render_loser_lists(loser_ranking: List[str], ctx: Dict):
         st.code(", ".join(ctx["loser_7_9"]) or "∅")
     with col3:
         st.markdown("**Edge groups (A–C / H–J)**")
-        st.write("A–C:", ", ".join(ctx["edge_AC"]) or "∅")
-        st.write("H–J:", ", ".join(ctx["edge_HJ"]) or "∅")
+        st.write("A–C:", ", ".join(edge_AC := [str(int(x)) for x in ctx["edge_AC"]]) or "∅")
+        st.write("H–J:", ", ".join(edge_HJ := [str(int(x)) for x in ctx["edge_HJ"]]) or "∅")
 
 def render_resolved_variables(ctx: Dict):
     st.subheader("Resolved variables (this run)")
