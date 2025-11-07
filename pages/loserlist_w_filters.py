@@ -58,7 +58,7 @@ def neighbors(letter: str, span: int = 1) -> List[str]:
 def digits_for_letters_currentmap(letters: Set[str], digit_current_letters: Dict[str,str]) -> List[str]:
     return [d for d in DIGITS if digit_current_letters.get(d) in letters]
 
-# >>> INT-safe emitters (changed): emit sets of INTS so int(d) membership works everywhere
+# >>> emit sets of INTS so int(d) membership works everywhere
 def fmt_list(xs: List[str]) -> str:
     return "{" + ",".join(str(int(d)) for d in xs) + "}"
 
@@ -203,6 +203,7 @@ def to_three_cols(df: pd.DataFrame) -> pd.DataFrame:
     cmap = {str(c).strip().lower(): c for c in df.columns}
     cols = set(cmap.keys())
 
+    # 3-col (name, description, expression)
     if {"name","description","expression"}.issubset(cols) and "id" not in cols:
         out = df[[cmap["name"], cmap["description"], cmap["expression"]]].copy()
         out.columns = ["name","description","expression"]
@@ -212,6 +213,7 @@ def to_three_cols(df: pd.DataFrame) -> pd.DataFrame:
         mask = (out["name"].str.strip().str.lower() != "name") & (out["expression"].str.strip() != "")
         return out.loc[mask].reset_index(drop=True)
 
+    # 5-col → collapse to 3 fields the tester expects
     need5 = {"id","name","enabled","applicable_if","expression"}
     if need5.issubset(cols):
         out = df[[cmap["id"], cmap["name"], cmap["enabled"], cmap["applicable_if"], cmap["expression"]]].copy()
@@ -228,11 +230,24 @@ def to_three_cols(df: pd.DataFrame) -> pd.DataFrame:
     raise ValueError("CSV must be 3-col (name,description,expression) or 5-col (id,name,enabled,applicable_if,expression).")
 
 # -----------------------------
-# Resolver — INT-safe membership injection (minimal edits)
+# Resolver — INT-safe membership injection
+# (ONLY change here: generator-preserving + repair)
 # -----------------------------
 def resolve_expression(expr: str, ctx: Dict) -> str:
+    """
+    Normalize CSV expressions into Python our evaluator can exec.
+
+    Minimal, safe edits:
+      - Preserve existing generators/comprehensions
+      - Inject int(d) only for membership checks
+      - Repair any sum(...) that lost its `for d in combo_digits`
+    """
     x = (normalize_quotes(expr or "")).strip()
 
+    # normalize comparators
+    x = x.replace('!==', '!=').replace('≤', '<=').replace('≥', '>=')
+
+    # variables that may appear on the RHS of "in"/"not in"
     list_vars = {
         "cooled_digits":      ctx["cooled_digits"],
         "new_core_digits":    ctx["new_core_digits"],
@@ -249,6 +264,7 @@ def resolve_expression(expr: str, ctx: Dict) -> str:
         "edge_AC":            ctx["edge_AC"],
         "edge_HJ":            ctx["edge_HJ"],
 
+        # positional shorthands (lower/upper)
         "s1": [ctx["seed_pos"][0]], "S1": [ctx["seed_pos"][0]],
         "s2": [ctx["seed_pos"][1]], "S2": [ctx["seed_pos"][1]],
         "s3": [ctx["seed_pos"][2]], "S3": [ctx["seed_pos"][2]],
@@ -261,8 +277,6 @@ def resolve_expression(expr: str, ctx: Dict) -> str:
         "p4": [ctx["p1_pos"][3]],    "P4": [ctx["p1_pos"][3]],
         "p5": [ctx["p1_pos"][4]],    "P5": [ctx["p1_pos"][4]],
         "seedp1": ctx.get("seedp1", []), "SEEDP1": ctx.get("seedp1", []),
-        "seed_plus1": ctx.get("seed_plus1", []), "SEED_PLUS1": ctx.get("seed_plus1", []),
-        "seed_plus_1": ctx.get("seed_plus_1", []), "SEED_PLUS_1": ctx.get("seed_plus_1", []),
 
         "c1": ctx.get("carry2", []), "C1": ctx.get("carry2", []),
         "c2": ctx.get("carry2", []), "C2": ctx.get("carry2", []),
@@ -287,15 +301,18 @@ def resolve_expression(expr: str, ctx: Dict) -> str:
         parts = [p.strip() for p in inner.split(",") if p.strip()]
         flat, seen = [], set()
         for p in parts:
+            # quoted digit '3'
             if (len(p) >= 3) and (p[0] == p[-1]) and (p[0] in "'\""):
                 val = p[1:-1].strip()
                 if len(val) == 1 and val.isdigit() and val not in seen:
                     seen.add(val); flat.append(val)
                 continue
+            # bare digit
             if len(p) == 1 and p.isdigit():
                 if p not in seen:
                     seen.add(p); flat.append(p)
                 continue
+            # named list
             if p in list_vars:
                 for d in list_vars[p]:
                     if d not in seen:
@@ -317,10 +334,20 @@ def resolve_expression(expr: str, ctx: Dict) -> str:
         x = re.sub(rf"\bin\s*\(\s*{name}\s*\)",       " in " + lit, x)
         x = re.sub(rf"\bnot\s+in\s*\(\s*{name}\s*\)", " not in " + lit, x)
 
-    # >>> Ensure d is INT in generator/comprehension membership
-    x = re.sub(r"sum\(\s*1\s*for\s+d\s+in\s+combo_digits\s+if\s+d\s+(in|not in)\s+",
-               lambda m: f"sum(int(d) {m.group(1)} ", x)
-    x = re.sub(r"sum\(\s*d\s+in\s+", "sum(int(d) in ", x)
+    # >>> generator-preserving + repair
+    # Cast d inside generator membership checks
+    x = re.sub(r"(\bif\s+)d(\s+(?:not\s+)?in\s+)", r"\1int(d)\2", x)
+    x = re.sub(r"\bsum\(\s*d\s+in\s+", "sum(int(d) in ", x)
+
+    # If a sum(...) dropped the generator, add it back
+    def _ensure_gen(m):
+        inner = m.group(1)
+        return f"sum(int(d) in {inner} for d in combo_digits)"
+    x = re.sub(r"\bsum\(\s*int\(d\)\s+(?:not\s+)?in\s*([^)]+)\)", _ensure_gen, x)
+    x = re.sub(r"\bsum\(\s*d\s+(?:not\s+)?in\s*([^)]+)\)",        _ensure_gen, x)
+
+    # Typo: "sum(1 for in combo_digits if ...)"
+    x = re.sub(r"\bsum\(\s*1\s*for\s+in\s+combo_digits", "sum(1 for d in combo_digits", x)
 
     # Letter-set contains → literal bool (if present)
     def letter_contains(txt: str, varname: str, letters: Set[str]) -> str:
@@ -330,6 +357,7 @@ def resolve_expression(expr: str, ctx: Dict) -> str:
     x = letter_contains(x, "prev_core_letters", set(ctx["prev_core_letters"]))
     x = letter_contains(x, "core_letters",      set(ctx["curr_core_letters"]))
 
+    # scalar replacements (sum flags)
     x = re.sub(r"\bseed_sum\b", str(ctx.get("seed_sum", 0)), x)
     x = re.sub(r"\bprev_sum\b", str(ctx.get("prev_sum", 0)), x)
     for key, val in (ctx.get("core_size_flags") or {}).items():
@@ -533,60 +561,3 @@ if "ctx" in st.session_state:
             st.error(str(e))
 else:
     st.info("Enter winners and click **Compute** first.")
-
-# =========================
-# PATCH: Minimal fix only — keep everything else identical
-# This resolve_expression() keeps your existing signature and context usage,
-# but also repairs any expression that dropped the generator (`for d in combo_digits`)
-# so `d` is never undefined during evaluation.
-def resolve_expression(expr: str, ctx: dict) -> str:
-    import re
-
-    if not isinstance(expr, str):
-        return ""
-
-    x = expr
-
-    # Normalize not-equals and unicode comparators
-    x = x.replace('!==', '!=').replace('≤', '<=').replace('≥', '>=')
-
-    # ---- Preserve proper generators & casts; gently repair bad emissions ----
-
-    # 1) Inside a generator clause, cast d only within membership checks
-    x = re.sub(r'(\bif\s+)d(\s+(?:not\s+)?in\s+)', r'\1int(d)\2', x)
-    x = re.sub(r'\bsum\(\s*d\s+in\s+', 'sum(int(d) in ', x)
-
-    # 2) If we ever see "sum(int(d) in X)" with no generator, add it back
-    def _ensure_gen(m):
-        inner = m.group(1)
-        return f"sum(int(d) in {inner} for d in combo_digits)"
-    x = re.sub(r'\bsum\(\s*int\(d\)\s+(?:not\s+)?in\s*([^)]+)\)', _ensure_gen, x)
-
-    # 3) Historical broken cast: "sum( d in X )" (no int(d) and no generator)
-    def _wrap_missing_gen(m):
-        inner = m.group(1)
-        return f"sum(int(d) in {inner} for d in combo_digits)"
-    x = re.sub(r'\bsum\(\s*d\s+(?:not\s+)?in\s*([^)]+)\)', _wrap_missing_gen, x)
-
-    # 4) Fix typo form "sum(1 for in combo_digits if ...)"
-    x = re.sub(r'\bsum\(\s*1\s*for\s+in\s+combo_digits', 'sum(1 for d in combo_digits', x)
-
-    # 5) Preserve your existing letter/ctx replacements (re-apply here so the new function
-    #    remains drop-in compatible with the old one). We look for the variables by name,
-    #    and if they aren't present in ctx we skip silently.
-    def _letter_contains(txt: str, varname: str, letters) -> str:
-        try:
-            patt = re.compile(r"'([A-J])'\s+in\s+" + re.escape(varname))
-            return patt.sub(lambda mm: "True" if mm.group(1) in set(letters) else "False", txt)
-        except Exception:
-            return txt
-
-    for var in [
-        "prev_core_letters", "core_letters", "prev_prev_core_letters",
-        "be_set_letters", "j_digits_letters"
-    ]:
-        if var in ctx:
-            x = _letter_contains(x, var, ctx.get(var, []))
-
-    return x
-# =========================
